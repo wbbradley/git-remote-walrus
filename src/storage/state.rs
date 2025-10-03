@@ -15,11 +15,5 @@ pub struct State {
     #[serde(default)]
     pub objects: HashMap<String, ContentId>, // git_sha1 -> backend_content_id
 
-    /// Optional: content ID of import marks file for incremental operations
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub import_marks: Option<ContentId>,
-
-    /// Optional: content ID of export marks file for incremental operations
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub export_marks: Option<ContentId>,
+    // Removed import_marks and export_marks - not needed for pack format
 }

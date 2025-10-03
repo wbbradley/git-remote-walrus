@@ -5,6 +5,7 @@ use std::path::PathBuf;
 mod commands;
 mod error;
 mod git;
+mod pack;
 mod protocol;
 mod storage;
 
