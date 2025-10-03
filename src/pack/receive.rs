@@ -38,35 +38,37 @@ pub fn receive_pack<R: Read>(
 
     eprintln!("Received pack of {} bytes", pack_data.len());
 
-    // Unpack using git index-pack
-    let mut index_pack = Command::new("git")
+    // Unpack using git unpack-objects (creates loose objects, not a pack)
+    let mut unpack = Command::new("git")
         .arg("--git-dir")
         .arg(&git_dir)
-        .arg("index-pack")
-        .arg("--stdin")
-        .arg("--fix-thin") // Handle thin packs
-        .arg("-v")
+        .arg("unpack-objects")
         .stdin(Stdio::piped())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
+        .stdout(Stdio::piped()) // Capture stdout
+        .stderr(Stdio::piped()) // Capture stderr
         .spawn()
-        .context("Failed to spawn git index-pack")?;
+        .context("Failed to spawn git unpack-objects")?;
 
-    // Write pack data to git index-pack stdin
-    index_pack
+    // Write pack data to git unpack-objects stdin
+    unpack
         .stdin
         .as_mut()
         .unwrap()
         .write_all(&pack_data)
-        .context("Failed to write pack to git index-pack")?;
+        .context("Failed to write pack to git unpack-objects")?;
 
-    let status = index_pack
-        .wait()
-        .context("Failed to wait for git index-pack")?;
+    let output = unpack
+        .wait_with_output()
+        .context("Failed to wait for git unpack-objects")?;
 
-    if !status.success() {
-        anyhow::bail!("git index-pack failed with status: {}", status);
+    if !output.status.success() {
+        eprintln!("git unpack-objects stdout: {}", String::from_utf8_lossy(&output.stdout));
+        eprintln!("git unpack-objects stderr: {}", String::from_utf8_lossy(&output.stderr));
+        anyhow::bail!("git unpack-objects failed with status: {}", output.status);
     }
+
+    // Log the unpack-objects output to stderr
+    eprintln!("git unpack-objects: {}", String::from_utf8_lossy(&output.stderr));
 
     // Collect all unpacked objects from .git/objects
     let objects = collect_loose_objects(&git_dir)?;

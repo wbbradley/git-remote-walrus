@@ -12,26 +12,40 @@ pub fn handle<S: StorageBackend, W: Write, R: BufRead>(
     output: &mut W,
     lines: &mut std::io::Lines<R>,
 ) -> Result<()> {
+    // The push command line already contains the first push spec
+    // Format: "push <src>:<dst>" was already parsed in protocol.rs
+    // We need to read the actual push specs from the command itself
+
+    // Git sends push specs on separate lines after "push" command
     // Read push commands until empty line
     let mut ref_updates = Vec::new();
 
     while let Some(line) = lines.next() {
         let line = line?;
-        let line = line.trim();
+        let line_trimmed = line.trim();
 
-        eprintln!("Push line: {}", line);
+        eprintln!("Push line: '{}'", line_trimmed);
 
-        if line.is_empty() {
+        if line_trimmed.is_empty() {
             break;
         }
 
         // Parse push command: "push <src>:<dst>"
-        if let Some(push_spec) = line.strip_prefix("push ") {
+        if let Some(push_spec) = line_trimmed.strip_prefix("push ") {
             let parts: Vec<&str> = push_spec.split(':').collect();
             if parts.len() == 2 {
                 let src = parts[0].to_string();
                 let dst = parts[1].to_string();
                 eprintln!("Parsed ref update: {} -> {}", src, dst);
+                ref_updates.push((src, dst));
+            }
+        } else {
+            // Line doesn't start with "push ", might be the refspec directly
+            let parts: Vec<&str> = line_trimmed.split(':').collect();
+            if parts.len() == 2 {
+                let src = parts[0].to_string();
+                let dst = parts[1].to_string();
+                eprintln!("Parsed ref update (no prefix): {} -> {}", src, dst);
                 ref_updates.push((src, dst));
             }
         }

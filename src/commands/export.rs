@@ -3,29 +3,29 @@ use std::io::{BufRead, Write};
 use std::process::Command;
 
 use crate::git::fast_export;
+use crate::pack::receive_pack;
 use crate::storage::StorageBackend;
 
 /// Handle the export command (push)
-/// Reads fast-export stream from stdin, stores it, and updates refs
+/// Uses pack format internally to preserve GPG signatures
 pub fn handle<S: StorageBackend, W: Write, R: BufRead>(
     storage: &S,
     output: &mut W,
     input: &mut std::io::Lines<R>,
 ) -> Result<()> {
-    // Read the commands from Git
+    // Read the export commands from Git
     let (_stream_data, ref_updates) = fast_export::parse_stream(input)?;
 
-    eprintln!("git-remote-gitwal: Extracted ref updates from Git: {:?}", ref_updates);
+    eprintln!("git-remote-gitwal: Ref updates from Git: {:?}", ref_updates);
 
-    // Git doesn't send us the actual commit data in the fast-export stream for remote helpers.
-    // Instead, it just tells us which refs to update. We need to run git fast-export ourselves.
+    // For each ref being pushed, get the commit SHA
     for (refname, _git_sha1) in &ref_updates {
         eprintln!("git-remote-gitwal: Processing ref {}", refname);
 
-        // Get the actual commit SHA that this ref points to locally
+        // Get the commit SHA that this ref points to locally
         let sha_output = Command::new("git")
             .arg("rev-parse")
-            .arg(&refname)
+            .arg(refname)
             .output()
             .context("Failed to run git rev-parse")?;
 
@@ -37,49 +37,60 @@ pub fn handle<S: StorageBackend, W: Write, R: BufRead>(
         let git_sha1 = String::from_utf8_lossy(&sha_output.stdout).trim().to_string();
         eprintln!("git-remote-gitwal: Ref {} points to {}", refname, git_sha1);
 
-        // Get the current ref value from storage to determine what we already have
+        // Create a packfile containing all objects for this ref
+        // Use git pack-objects to create the packfile
         let state = storage.read_state()?;
-        let old_sha = state.refs.get(refname).cloned();
+        let old_sha = state.refs.get(refname);
 
-        // Build the git fast-export command
-        let export_arg = if let Some(old) = &old_sha {
-            // Incremental: export commits from old..new
+        // Build revision range for incremental push
+        let rev_range = if let Some(old) = old_sha {
             format!("{}..{}", old, git_sha1)
         } else {
-            // Full export: export the entire ref
             git_sha1.clone()
         };
 
-        eprintln!("git-remote-gitwal: Running git fast-export {}", export_arg);
+        eprintln!("git-remote-gitwal: Creating packfile for {}", rev_range);
 
-        // Run git fast-export to get the actual commit data
-        // Use --signed-tags=verbatim to preserve GPG signatures on both tags and commits
-        let output_result = Command::new("git")
-            .arg("fast-export")
-            .arg("--all")
-            .arg("--signed-tags=verbatim")
-            .arg("--tag-of-filtered-object=drop")
-            .output()
-            .context("Failed to run git fast-export")?;
+        // Use git rev-list to get all objects, then pack them
+        let mut pack_output = Command::new("git")
+            .arg("pack-objects")
+            .arg("--revs")
+            .arg("--stdout")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .context("Failed to spawn git pack-objects")?;
 
-        if !output_result.status.success() {
-            anyhow::bail!(
-                "git fast-export failed: {}",
-                String::from_utf8_lossy(&output_result.stderr)
-            );
+        // Write the revision to pack-objects stdin
+        {
+            use std::io::Write as _;
+            if let Some(ref mut stdin) = pack_output.stdin {
+                writeln!(stdin, "{}", git_sha1)?;
+            }
         }
 
-        let export_data = output_result.stdout;
-        eprintln!("git-remote-gitwal: Exported {} bytes", export_data.len());
+        let pack_result = pack_output.wait_with_output()?;
+        if !pack_result.status.success() {
+            anyhow::bail!("git pack-objects failed");
+        }
 
-        // Store the export data
-        let content_id = storage.write_object(&export_data)?;
-        eprintln!("git-remote-gitwal: Stored export data as {}", content_id);
+        eprintln!("git-remote-gitwal: Created packfile of {} bytes", pack_result.stdout.len());
 
-        // Update state
+        // Receive and store the packfile
+        let mut pack_data = &pack_result.stdout[..];
+        let object_mappings = receive_pack(&mut pack_data, storage)
+            .context("Failed to receive pack")?;
+
+        eprintln!("git-remote-gitwal: Stored {} objects", object_mappings.len());
+
+        // Update state with new objects and ref
         storage.update_state(|state| {
+            // Add all object mappings
+            for (obj_id, content_id) in &object_mappings {
+                state.objects.insert(obj_id.clone(), content_id.clone());
+            }
+            // Update the ref to point to the new commit
             state.refs.insert(refname.clone(), git_sha1.clone());
-            state.objects.insert(git_sha1.clone(), content_id.clone());
             Ok(())
         })?;
 

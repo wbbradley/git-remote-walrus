@@ -117,40 +117,42 @@ fn create_packfile<W: Write>(
     output: &mut W,
 ) -> Result<()> {
     // git pack-objects reads object IDs from stdin, one per line
+    // Without --revs, it expects object SHAs directly
     let mut pack_objects = Command::new("git")
         .arg("--git-dir")
         .arg(git_dir)
         .arg("pack-objects")
         .arg("--stdout")
-        .arg("--revs")
-        .arg("--thin")
-        .arg("--delta-base-offset")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
+        .stderr(Stdio::piped())
         .spawn()
         .context("Failed to spawn git pack-objects")?;
 
-    // Write object IDs to stdin
+    // Write object IDs to stdin and close it
     {
         let stdin = pack_objects.stdin.as_mut().unwrap();
         for obj_id in object_ids {
             writeln!(stdin, "{}", obj_id).context("Failed to write object ID to pack-objects")?;
         }
+        // Explicitly drop stdin to close the pipe
+        drop(pack_objects.stdin.take());
     }
 
-    // Read packfile from stdout and write to output
-    let mut pack_stdout = pack_objects.stdout.take().unwrap();
-    std::io::copy(&mut pack_stdout, output).context("Failed to copy packfile to output")?;
-
-    let status = pack_objects
-        .wait()
+    // Wait for pack-objects to finish and get output
+    let pack_output = pack_objects
+        .wait_with_output()
         .context("Failed to wait for git pack-objects")?;
 
-    if !status.success() {
-        anyhow::bail!("git pack-objects failed with status: {}", status);
+    if !pack_output.status.success() {
+        eprintln!("git pack-objects stderr: {}", String::from_utf8_lossy(&pack_output.stderr));
+        anyhow::bail!("git pack-objects failed with status: {}", pack_output.status);
     }
 
-    eprintln!("Packfile created successfully");
+    // Write packfile to output
+    output.write_all(&pack_output.stdout)
+        .context("Failed to write packfile to output")?;
+
+    eprintln!("Packfile created successfully ({} bytes)", pack_output.stdout.len());
     Ok(())
 }
