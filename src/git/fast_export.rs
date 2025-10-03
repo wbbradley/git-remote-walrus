@@ -26,6 +26,12 @@ pub fn parse_stream<R: BufRead>(
             break;
         }
 
+        // Parse reset lines to track ref deletions/initializations
+        if trimmed.starts_with("reset ") {
+            current_ref = Some(trimmed[6..].to_string());
+            commit_sha1 = None;
+        }
+
         // Parse commit lines to track which ref we're updating
         if trimmed.starts_with("commit ") {
             current_ref = Some(trimmed[7..].to_string());
@@ -38,6 +44,11 @@ pub fn parse_stream<R: BufRead>(
             // Handle both marks (:1) and SHA-1s
             if !sha1.starts_with(':') && sha1.len() == 40 {
                 commit_sha1 = Some(sha1.to_string());
+
+                // For reset commands with 'from', immediately record the ref update
+                if let Some(ref refname) = current_ref {
+                    ref_updates.insert(refname.clone(), sha1.to_string());
+                }
             }
         }
 

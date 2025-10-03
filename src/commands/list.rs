@@ -12,9 +12,14 @@ pub fn handle<S: StorageBackend, W: Write>(
 ) -> Result<()> {
     let state = storage.read_state()?;
 
-    // Output each ref with its Git SHA-1
-    for (refname, git_sha1) in &state.refs {
-        writeln!(output, "{} {}", git_sha1, refname)?;
+    // For the import/export protocol, we need to list refs but NOT with specific SHAs
+    // because Git will create the objects during fast-import.
+    // Instead, we use special markers to indicate refs exist but Git should import them.
+
+    // Output each ref with a special marker indicating it should be imported
+    for (refname, _git_sha1) in &state.refs {
+        // Use @<refname> syntax to indicate this ref exists and needs to be fetched
+        writeln!(output, "? {}", refname)?;
     }
 
     // Output default branch pointer (HEAD)

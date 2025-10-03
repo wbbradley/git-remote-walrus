@@ -11,15 +11,18 @@ mod storage;
 use storage::StorageBackend;
 
 fn main() -> Result<()> {
-    // Git passes the remote URL as the first argument
-    // Example: git-remote-gitwal gitwal::/path/to/storage
+    // Git passes three arguments:
+    // 1. Binary path
+    // 2. Remote name (e.g., "storage")
+    // 3. Remote URL (e.g., "gitwal::/tmp/storage")
     let args: Vec<String> = env::args().collect();
 
-    if args.len() < 2 {
-        anyhow::bail!("Usage: git-remote-gitwal <remote-url>");
+    if args.len() < 3 {
+        anyhow::bail!("Usage: git-remote-gitwal <remote-name> <remote-url>");
     }
 
-    let remote_url = &args[1];
+    let _remote_name = &args[1];
+    let remote_url = &args[2];
 
     // Parse the URL - format is gitwal::<path>
     let storage_path = parse_remote_url(remote_url)?;
@@ -38,10 +41,12 @@ fn main() -> Result<()> {
 }
 
 fn parse_remote_url(url: &str) -> Result<PathBuf> {
-    // Format: gitwal::/path/to/storage or gitwal::relative/path
-    if let Some(path_str) = url.strip_prefix("gitwal::") {
-        Ok(PathBuf::from(path_str))
-    } else {
-        anyhow::bail!("Invalid remote URL format. Expected: gitwal::<path>");
-    }
+    eprintln!("git-remote-gitwal: Parsing URL: '{}'", url);
+
+    // Git strips the protocol prefix, so we might receive either:
+    // - "gitwal::/path/to/storage" (user-specified format)
+    // - "/path/to/storage" (Git has already stripped "gitwal::")
+    let path_str = url.strip_prefix("gitwal::").unwrap_or(url);
+
+    Ok(PathBuf::from(path_str))
 }
