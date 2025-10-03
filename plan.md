@@ -78,12 +78,16 @@ Our implementation must adhere to these constraints:
 
 ## 3. Architecture Design
 
-### Directory Structure
+### Storage Abstraction Layer
+
+**Key Design Decision:** All storage operations go through a trait-based abstraction to allow swapping backends. The reference implementation uses a filesystem with SHA-256 content addressing, but the system is designed to support other backends (e.g., cloud object storage, custom content stores).
+
+### Directory Structure (Filesystem Implementation)
 
 ```
 <storage-path>/
 ├── objects/           # Content-addressed immutable storage
-│   ├── ab12cd34...    # SHA-256 named files containing Git objects
+│   ├── ab12cd34...    # Content ID named files (SHA-256 in filesystem impl)
 │   ├── ef56gh78...    # Could be: pack files, marks files, or individual objects
 │   └── ...
 └── state.yaml         # Mutable state file
@@ -96,13 +100,18 @@ The `state.yaml` file contains pointers to the current state:
 ```yaml
 # Current refs (branches and tags)
 refs:
-  refs/heads/main: "abc123def456..."      # SHA-256 of commit object
+  refs/heads/main: "abc123def456..."      # Git SHA-1 of commit object
   refs/heads/develop: "789012abc345..."
   refs/tags/v1.0.0: "def678901234..."
 
+# Mapping from Git SHA-1 to storage content IDs (opaque backend identifiers)
+objects:
+  abc123def456...: "content-id-from-backend"  # Could be SHA-256, URI, UUID, etc.
+  789012abc345...: "another-content-id"
+
 # Marks for incremental operations (optional)
-import_marks: "sha256-of-import-marks-file"
-export_marks: "sha256-of-export-marks-file"
+import_marks: "content-id-of-import-marks-file"
+export_marks: "content-id-of-export-marks-file"
 
 # Metadata (optional)
 last_modified: "2025-10-02T12:34:56Z"
@@ -134,16 +143,18 @@ last_modified: "2025-10-02T12:34:56Z"
 │              │                       │
 │  ┌───────────▼───────────────────┐  │
 │  │   Storage Layer               │  │
-│  │   - SHA-256 content addressing│  │
-│  │   - Immutable object store    │  │
-│  │   - State.yaml management     │  │
+│  │   - StorageBackend trait      │  │
+│  │   - ImmutableStore operations │  │
+│  │   - MutableState management   │  │
 │  └───────────┬───────────────────┘  │
 └──────────────┼───────────────────────┘
                │
                ▼
-       ┌──────────────┐
-       │  Filesystem  │
-       └──────────────┘
+       ┌─────────────────────────┐
+       │  Backend Implementation │
+       │  (Filesystem, Cloud,    │
+       │   Custom Store, etc.)   │
+       └─────────────────────────┘
 ```
 
 ---
@@ -300,76 +311,193 @@ ok refs/heads/develop
 
 ## 5. Storage Layer Implementation
 
-### 5.1 Content-Addressed Storage
+### 5.1 Storage Trait Abstraction
 
-**Hash Function:** SHA-256 (64 hex characters)
+**Core Design Philosophy:** All storage operations go through traits to enable backend pluggability. The content addressing scheme is backend-specific and treated as opaque by the rest of the system.
 
-**Write Operation:**
 ```rust
-fn write_object(content: &[u8]) -> Result<String> {
-    // 1. Compute SHA-256 hash
-    let hash = sha256(content);
-    let hash_hex = hex::encode(hash);
+/// Opaque content identifier returned by storage backend.
+/// Could be a SHA-256 hash, UUID, URI, or any backend-specific format.
+pub type ContentId = String;
 
-    // 2. Write to objects/ directory
-    let path = format!("objects/{}", hash_hex);
+/// Trait for immutable, content-addressed storage operations
+pub trait ImmutableStore {
+    /// Write content and return its content identifier.
+    /// If content already exists, returns identifier without writing.
+    fn write_object(&self, content: &[u8]) -> Result<ContentId>;
 
-    // 3. Only write if doesn't exist (immutable)
-    if !exists(&path) {
-        write_file(&path, content)?;
+    /// Write multiple objects in a batch operation.
+    /// Returns content identifiers in the same order as inputs.
+    /// More efficient than multiple write_object calls for some backends.
+    fn write_objects(&self, contents: &[&[u8]]) -> Result<Vec<ContentId>>;
+
+    /// Read object by content identifier into memory.
+    /// Returns error if object doesn't exist.
+    fn read_object(&self, id: &str) -> Result<Vec<u8>>;
+
+    /// Read multiple objects in a batch operation.
+    /// Returns objects in the same order as requested ids.
+    /// Returns error if any object doesn't exist.
+    fn read_objects(&self, ids: &[&str]) -> Result<Vec<Vec<u8>>>;
+
+    /// Delete object by content identifier.
+    /// Returns Ok(()) even if object didn't exist.
+    fn delete_object(&self, id: &str) -> Result<()>;
+
+    /// Check if object exists by identifier.
+    fn object_exists(&self, id: &str) -> Result<bool>;
+}
+
+/// Trait for mutable state management
+pub trait MutableState {
+    /// Read the current state.
+    /// Returns default state if none exists.
+    fn read_state(&self) -> Result<State>;
+
+    /// Atomically write new state.
+    /// Implementation should ensure atomicity (temp file + rename or equivalent).
+    fn write_state(&self, state: &State) -> Result<()>;
+
+    /// Atomically update state using a closure.
+    /// Handles read-modify-write with proper atomicity.
+    fn update_state<F>(&self, update_fn: F) -> Result<()>
+    where
+        F: FnOnce(&mut State) -> Result<()>;
+}
+
+/// Combined storage backend trait
+pub trait StorageBackend: ImmutableStore + MutableState {
+    /// Initialize storage (create directories, verify access, etc.)
+    fn initialize(&self) -> Result<()>;
+}
+```
+
+### 5.2 Filesystem Implementation
+
+**Reference implementation using SHA-256 content addressing:**
+
+```rust
+pub struct FilesystemStorage {
+    base_path: PathBuf,
+}
+
+impl ImmutableStore for FilesystemStorage {
+    fn write_object(&self, content: &[u8]) -> Result<ContentId> {
+        // 1. Compute SHA-256 hash
+        let hash = sha256(content);
+        let hash_hex = hex::encode(hash);
+
+        // 2. Write to objects/ directory
+        let path = self.base_path.join("objects").join(&hash_hex);
+
+        // 3. Only write if doesn't exist (immutable)
+        if !path.exists() {
+            std::fs::write(&path, content)?;
+        }
+
+        Ok(hash_hex)
     }
 
-    Ok(hash_hex)
+    fn write_objects(&self, contents: &[&[u8]]) -> Result<Vec<ContentId>> {
+        // Simple implementation: write sequentially
+        // Could be optimized with parallel writes if needed
+        contents.iter()
+            .map(|content| self.write_object(content))
+            .collect()
+    }
+
+    fn read_object(&self, id: &str) -> Result<Vec<u8>> {
+        let path = self.base_path.join("objects").join(id);
+        // Must read entire file into memory (no seeking)
+        Ok(std::fs::read(&path)?)
+    }
+
+    fn read_objects(&self, ids: &[&str]) -> Result<Vec<Vec<u8>>> {
+        ids.iter()
+            .map(|id| self.read_object(id))
+            .collect()
+    }
+
+    fn delete_object(&self, id: &str) -> Result<()> {
+        let path = self.base_path.join("objects").join(id);
+        if path.exists() {
+            std::fs::remove_file(&path)?;
+        }
+        Ok(())
+    }
+
+    fn object_exists(&self, id: &str) -> Result<bool> {
+        let path = self.base_path.join("objects").join(id);
+        Ok(path.exists())
+    }
+}
+
+impl MutableState for FilesystemStorage {
+    // Implementation in next section
+}
+
+impl StorageBackend for FilesystemStorage {
+    fn initialize(&self) -> Result<()> {
+        std::fs::create_dir_all(self.base_path.join("objects"))?;
+        Ok(())
+    }
 }
 ```
 
-**Read Operation:**
+**Why This Design:**
+- **Backend Agnostic:** ContentId is opaque; backends can use any addressing scheme
+- **Batch Operations:** Supports efficient batch uploads for remote storage backends
+- **Simple Interface:** Clear separation between immutable objects and mutable state
+- **Future-Proof:** Easy to add cloud storage, databases, or custom backends
+
+### 5.3 State Management (MutableState Implementation)
+
+**Atomic Update Pattern for Filesystem:**
 ```rust
-fn read_object(hash: &str) -> Result<Vec<u8>> {
-    let path = format!("objects/{}", hash);
-    // Must read entire file into memory (no seeking)
-    read_entire_file(&path)
+impl MutableState for FilesystemStorage {
+    fn read_state(&self) -> Result<State> {
+        let state_path = self.base_path.join("state.yaml");
+        if state_path.exists() {
+            let content = std::fs::read_to_string(&state_path)?;
+            Ok(serde_yaml::from_str(&content)?)
+        } else {
+            Ok(State::default())
+        }
+    }
+
+    fn write_state(&self, state: &State) -> Result<()> {
+        let state_path = self.base_path.join("state.yaml");
+        let temp_path = self.base_path.join(".state.yaml.tmp");
+
+        // 1. Write to temp file
+        let yaml = serde_yaml::to_string(state)?;
+        std::fs::write(&temp_path, yaml)?;
+
+        // 2. Atomic rename (atomic on POSIX systems)
+        std::fs::rename(&temp_path, &state_path)?;
+
+        Ok(())
+    }
+
+    fn update_state<F>(&self, update_fn: F) -> Result<()>
+    where
+        F: FnOnce(&mut State) -> Result<()>
+    {
+        // 1. Read current state
+        let mut state = self.read_state()?;
+
+        // 2. Apply updates
+        update_fn(&mut state)?;
+
+        // 3. Write atomically
+        self.write_state(&state)?;
+
+        Ok(())
+    }
 }
 ```
 
-**Delete Operation:**
-```rust
-fn delete_object(hash: &str) -> Result<()> {
-    let path = format!("objects/{}", hash);
-    remove_file(&path)
-}
-```
-
-### 5.2 State Management
-
-**Atomic Update Pattern:**
-```rust
-fn update_state<F>(storage_path: &Path, update_fn: F) -> Result<()>
-where F: FnOnce(&mut State) -> Result<()>
-{
-    // 1. Read current state
-    let state_path = storage_path.join("state.yaml");
-    let mut state = if state_path.exists() {
-        read_state(&state_path)?
-    } else {
-        State::default()
-    };
-
-    // 2. Apply updates
-    update_fn(&mut state)?;
-
-    // 3. Write to temp file
-    let temp_path = storage_path.join(".state.yaml.tmp");
-    write_state(&temp_path, &state)?;
-
-    // 4. Atomic rename
-    rename(&temp_path, &state_path)?;
-
-    Ok(())
-}
-```
-
-### 5.3 Data Model
+### 5.4 Data Model
 
 **What to Store:**
 
@@ -380,14 +508,24 @@ For maximum simplicity, we'll store:
 
 **State Structure:**
 ```rust
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Default)]
 struct State {
+    /// Maps Git ref names to Git SHA-1 commit hashes (40 hex chars)
+    #[serde(default)]
     refs: HashMap<String, String>,  // ref_name -> git_sha1
-    objects: HashMap<String, String>, // git_sha1 -> storage_sha256
+
+    /// Maps Git SHA-1 hashes to backend content identifiers (opaque)
+    /// Content IDs could be SHA-256, URIs, UUIDs - backend-specific
+    #[serde(default)]
+    objects: HashMap<String, ContentId>, // git_sha1 -> backend_content_id
+
+    /// Optional: content ID of import marks file for incremental operations
     #[serde(skip_serializing_if = "Option::is_none")]
-    import_marks: Option<String>,
+    import_marks: Option<ContentId>,
+
+    /// Optional: content ID of export marks file for incremental operations
     #[serde(skip_serializing_if = "Option::is_none")]
-    export_marks: Option<String>,
+    export_marks: Option<ContentId>,
 }
 ```
 
@@ -398,15 +536,18 @@ When receiving a push (export):
 2. Parse it to extract:
    - Final commit SHA-1s for each ref
    - The complete object graph
-3. Store entire stream as immutable object: `objects/<sha256>`
-4. Update `state.refs` with ref → SHA-1 mappings
-5. Update `state.objects` with SHA-1 → storage_sha256 mappings
+3. Store entire stream as immutable object via `backend.write_object()` → get ContentId
+4. Update `state.refs` with ref → Git SHA-1 mappings
+5. Update `state.objects` with Git SHA-1 → ContentId mappings
 
 When handling a fetch (import):
 1. Look up requested refs in `state.refs` → get Git SHA-1s
-2. Look up SHA-1s in `state.objects` → get storage hashes
-3. Read stored fast-import streams from `objects/<sha256>`
+2. Look up SHA-1s in `state.objects` → get ContentIds
+3. Read stored fast-import streams via `backend.read_object(content_id)`
 4. Output to stdout for Git to import
+
+**Batch Operations:**
+When storing multiple objects (e.g., multiple branches pushed at once), use `write_objects()` for efficiency. This is particularly beneficial for remote backends that support batch uploads.
 
 ---
 
@@ -506,13 +647,20 @@ We can optionally implement marks support for efficiency.
 3. Set up binary that Git can invoke
 4. Parse command-line args (Git passes URL as argument)
 
-### Phase 2: Storage Layer
-1. Implement SHA-256 hashing utilities
-2. Implement content-addressed write (compute hash, write to objects/)
-3. Implement read (read entire file into memory)
-4. Implement State struct with serde YAML
-5. Implement atomic state file updates (temp file + rename)
-6. Add tests for storage operations
+### Phase 2: Storage Traits and Filesystem Implementation
+1. Define storage trait module (`storage/traits.rs`):
+   - `ContentId` type alias
+   - `ImmutableStore` trait
+   - `MutableState` trait
+   - `StorageBackend` trait
+2. Implement `FilesystemStorage` backend:
+   - SHA-256 hashing utilities
+   - `ImmutableStore` implementation (write_object, write_objects, read_object, read_objects, etc.)
+   - `MutableState` implementation (atomic state updates with temp file + rename)
+   - `StorageBackend` implementation (initialize)
+3. Implement State struct with serde YAML
+4. Add comprehensive tests for all storage operations
+5. Document trait contract and requirements for future implementers
 
 ### Phase 3: Protocol Handler
 1. Set up stdin/stdout communication
@@ -611,20 +759,25 @@ We can optionally implement marks support for efficiency.
 
 **Chosen: Option A** for initial implementation, optimize later if needed.
 
-### Decision 2: How to Handle Git SHA-1 vs Storage SHA-256
+### Decision 2: How to Handle Git SHA-1 vs Backend Content IDs
 
-Git uses SHA-1 (40 hex chars) for object identification. We use SHA-256 (64 hex chars) for content addressing.
+Git uses SHA-1 (40 hex chars) for object identification. Storage backends use opaque content identifiers (could be SHA-256, URIs, UUIDs, etc.).
 
 **Mapping:**
 ```
-Git Object SHA-1 → Storage SHA-256 (of the fast-export stream containing it)
+Git Object SHA-1 → Backend ContentId (opaque, backend-specific)
 ```
 
 Store this mapping in state.yaml:
 ```yaml
 objects:
-  abc123def456...: "sha256-of-stream-containing-this-commit"
+  abc123def456...: "backend-content-id"  # Opaque identifier from storage backend
 ```
+
+**Why Opaque Content IDs:**
+- Different backends have different addressing schemes (hashes, URIs, database keys)
+- System doesn't need to know or care about the format
+- Easy to swap backends without changing core logic
 
 ### Decision 3: Handling Refs
 
@@ -674,16 +827,16 @@ git push origin main
 9. Helper updates state.yaml with refs
 10. Helper responds: `ok refs/heads/main\n\n`
 
-**Storage after push:**
+**Storage after push (Filesystem backend):**
 ```
 /tmp/mystorage/
 ├── objects/
-│   └── a1b2c3d4...  (64 char SHA-256, contains fast-export stream)
+│   └── a1b2c3d4...  (ContentId: 64 char SHA-256 in filesystem impl)
 └── state.yaml
     refs:
       refs/heads/main: "abc123..."  (40 char Git SHA-1)
     objects:
-      abc123...: "a1b2c3d4..."
+      abc123...: "a1b2c3d4..."  (ContentId from backend)
 ```
 
 ### Workflow 2: Clone
@@ -872,8 +1025,9 @@ git-remote-gitwal/
     │   └── export.rs        # Export command (push)
     ├── storage/
     │   ├── mod.rs
-    │   ├── content.rs       # Content-addressed storage
-    │   └── state.rs         # State management
+    │   ├── traits.rs        # StorageBackend, ImmutableStore, MutableState traits
+    │   ├── filesystem.rs    # FilesystemStorage implementation
+    │   └── state.rs         # State struct definition
     ├── git/
     │   ├── mod.rs
     │   ├── fast_import.rs   # Fast-import format generation
