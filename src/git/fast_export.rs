@@ -12,6 +12,7 @@ pub fn parse_stream<R: BufRead>(
     let mut current_ref: Option<String> = None;
     let mut commit_sha1: Option<String> = None;
 
+    #[allow(clippy::while_let_on_iterator)]
     while let Some(line) = lines.next() {
         let line = line.context("Failed to read line from fast-export stream")?;
 
@@ -27,20 +28,20 @@ pub fn parse_stream<R: BufRead>(
         }
 
         // Parse reset lines to track ref deletions/initializations
-        if trimmed.starts_with("reset ") {
-            current_ref = Some(trimmed[6..].to_string());
+        if let Some(stripped) = trimmed.strip_prefix("reset ") {
+            current_ref = Some(stripped.to_string());
             commit_sha1 = None;
         }
 
         // Parse commit lines to track which ref we're updating
-        if trimmed.starts_with("commit ") {
-            current_ref = Some(trimmed[7..].to_string());
+        if let Some(stripped) = trimmed.strip_prefix("commit ") {
+            current_ref = Some(stripped.to_string());
             commit_sha1 = None;
         }
 
         // Parse 'from' lines which contain the Git SHA-1 of the commit
-        if trimmed.starts_with("from ") {
-            let sha1 = trimmed[5..].trim();
+        if let Some(sha1_str) = trimmed.strip_prefix("from ") {
+            let sha1 = sha1_str.trim();
             // Handle both marks (:1) and SHA-1s
             if !sha1.starts_with(':') && sha1.len() == 40 {
                 commit_sha1 = Some(sha1.to_string());
@@ -59,8 +60,7 @@ pub fn parse_stream<R: BufRead>(
         }
 
         // Handle 'data' command - need to read exact number of bytes
-        if trimmed.starts_with("data ") {
-            let size_str = &trimmed[5..];
+        if let Some(size_str) = trimmed.strip_prefix("data ") {
             let size: usize = size_str
                 .parse()
                 .context("Failed to parse data size in fast-export stream")?;
@@ -106,19 +106,19 @@ fn extract_refs_from_stream(stream: &[u8]) -> Result<HashMap<String, String>> {
         let trimmed = line.trim();
 
         // Track which ref we're committing to
-        if trimmed.starts_with("commit ") {
-            current_ref = Some(trimmed[7..].to_string());
+        if let Some(stripped) = trimmed.strip_prefix("commit ") {
+            current_ref = Some(stripped.to_string());
             last_mark = None;
         }
 
         // Track mark assignments
-        if trimmed.starts_with("mark ") {
-            last_mark = Some(trimmed[5..].to_string());
+        if let Some(stripped) = trimmed.strip_prefix("mark ") {
+            last_mark = Some(stripped.to_string());
         }
 
         // When we see a 'from', it might contain a SHA-1
-        if trimmed.starts_with("from ") {
-            let from_ref = trimmed[5..].trim();
+        if let Some(from_str) = trimmed.strip_prefix("from ") {
+            let from_ref = from_str.trim();
             if from_ref.len() == 40 && !from_ref.starts_with(':') {
                 // This is a SHA-1
                 if let Some(mark) = &last_mark {
@@ -129,26 +129,26 @@ fn extract_refs_from_stream(stream: &[u8]) -> Result<HashMap<String, String>> {
 
         // Try to generate a pseudo-SHA-1 for commits without 'from'
         // In reality, we'd need to compute this properly
-        if trimmed.starts_with("committer ") && current_ref.is_some() {
-            // Generate a deterministic hash based on the ref name and content
-            if let Some(mark) = &last_mark {
+        if trimmed.starts_with("committer ") {
+            if let (Some(ref_name), Some(mark)) = (&current_ref, &last_mark) {
                 // For initial commits without a 'from', generate a SHA-1
                 if !marks_to_sha.contains_key(mark) {
                     // Use a hash of the stream content up to this point as SHA-1
-                    let pseudo_sha1 = generate_pseudo_sha1(&current_ref.as_ref().unwrap());
+                    let pseudo_sha1 = generate_pseudo_sha1(ref_name);
                     marks_to_sha.insert(mark.clone(), pseudo_sha1.clone());
 
-                    ref_updates.insert(current_ref.clone().unwrap(), pseudo_sha1);
+                    ref_updates.insert(ref_name.clone(), pseudo_sha1);
                 }
             }
         }
     }
 
     // If we still have no ref updates, create a default one
-    if ref_updates.is_empty() && current_ref.is_some() {
-        let ref_name = current_ref.unwrap();
-        let pseudo_sha1 = generate_pseudo_sha1(&ref_name);
-        ref_updates.insert(ref_name, pseudo_sha1);
+    if ref_updates.is_empty() {
+        if let Some(ref_name) = current_ref {
+            let pseudo_sha1 = generate_pseudo_sha1(&ref_name);
+            ref_updates.insert(ref_name, pseudo_sha1);
+        }
     }
 
     Ok(ref_updates)

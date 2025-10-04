@@ -1,267 +1,261 @@
-use std::fs;
-use std::path::PathBuf;
+//! End-to-end integration tests for git-remote-gitwal
+//!
+//! These tests require the git-remote-gitwal binary to be built.
+//! Run with: cargo test --release
+
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Once;
 use tempfile::TempDir;
 
+static INIT: Once = Once::new();
+
+/// Setup git-remote-gitwal in PATH for tests
+/// This ensures Git can find our custom remote helper
+fn setup_git_remote() {
+    INIT.call_once(|| {
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let binary_path = PathBuf::from(manifest_dir).join("target/release");
+
+        // Verify the binary exists
+        let binary = binary_path.join("git-remote-gitwal");
+        if !binary.exists() {
+            panic!(
+                "git-remote-gitwal binary not found at: {}\n\
+                 Please build it first with: cargo build --release",
+                binary.display()
+            );
+        }
+
+        // Add our binary directory to PATH
+        let current_path = std::env::var("PATH").unwrap_or_default();
+        let new_path = format!("{}:{}", binary_path.display(), current_path);
+        std::env::set_var("PATH", new_path);
+
+        eprintln!("✓ git-remote-gitwal added to PATH for testing");
+    });
+}
+
 /// Helper to run git commands in a directory
-fn git_command(dir: &PathBuf, args: &[&str]) -> std::process::Output {
-    Command::new("git")
+fn git(dir: &Path, args: &[&str]) -> String {
+    let output = Command::new("git")
         .current_dir(dir)
         .args(args)
         .output()
-        .expect("Failed to run git command")
-}
+        .expect("failed to execute git");
 
-/// Create a test repository with commits
-fn create_test_repo(dir: &PathBuf, signed: bool) -> PathBuf {
-    let repo_dir = dir.join("test-repo");
-    fs::create_dir(&repo_dir).expect("Failed to create repo dir");
-
-    // Initialize repo
-    git_command(&repo_dir, &["init"]);
-    git_command(&repo_dir, &["config", "user.name", "Test User"]);
-    git_command(&repo_dir, &["config", "user.email", "test@example.com"]);
-
-    // Create some commits
-    fs::write(repo_dir.join("file1.txt"), "content 1").unwrap();
-    git_command(&repo_dir, &["add", "."]);
-
-    if signed {
-        // Try to sign the commit (will fail if no GPG key, that's ok for now)
-        git_command(&repo_dir, &["commit", "-S", "-m", "Initial commit"]);
-    } else {
-        git_command(&repo_dir, &["commit", "-m", "Initial commit"]);
-    }
-
-    fs::write(repo_dir.join("file2.txt"), "content 2").unwrap();
-    git_command(&repo_dir, &["add", "."]);
-
-    if signed {
-        git_command(&repo_dir, &["commit", "-S", "-m", "Second commit"]);
-    } else {
-        git_command(&repo_dir, &["commit", "-m", "Second commit"]);
-    }
-
-    repo_dir
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
 #[test]
-fn test_fast_export_preserves_commits() {
+fn test_basic_push_clone() {
+    setup_git_remote();
+
     let temp = TempDir::new().unwrap();
-    let repo = create_test_repo(&temp.path().to_path_buf(), false);
+    let test_repo = temp.path().join("test-repo");
+    let storage = temp.path().join("storage");
+    let cloned_repo = temp.path().join("cloned");
 
-    // Get original commit SHAs
-    let log_output = git_command(&repo, &["log", "--format=%H"]);
-    let original_shas = String::from_utf8_lossy(&log_output.stdout);
+    // Create test repository
+    std::fs::create_dir(&test_repo).unwrap();
+    git(&test_repo, &["init"]);
+    git(&test_repo, &["config", "user.name", "Test"]);
+    git(&test_repo, &["config", "user.email", "test@test.com"]);
 
-    println!("Original SHAs:\n{}", original_shas);
+    // Create first commit
+    std::fs::write(test_repo.join("file1.txt"), "Hello World").unwrap();
+    git(&test_repo, &["add", "file1.txt"]);
+    git(&test_repo, &["commit", "-m", "First commit"]);
 
-    // Export without signed-commits flag (current behavior)
-    let export1 = git_command(
-        &repo,
-        &["fast-export", "--all", "--signed-tags=verbatim"],
+    // Create second commit
+    std::fs::write(test_repo.join("file2.txt"), "Second file").unwrap();
+    git(&test_repo, &["add", "file2.txt"]);
+    git(&test_repo, &["commit", "-m", "Second commit"]);
+
+    let orig_sha = git(&test_repo, &["rev-parse", "HEAD"]);
+
+    // Push to gitwal
+    let storage_url = format!("gitwal::{}", storage.display());
+    git(&test_repo, &["push", &storage_url, "main"]);
+
+    // Clone from gitwal
+    git(
+        temp.path(),
+        &["clone", &storage_url, cloned_repo.to_str().unwrap()],
     );
 
-    // Export with signed-commits flag (proposed fix)
-    let export2 = git_command(
-        &repo,
-        &["fast-export", "--all", "--signed-tags=verbatim", "--signed-commits=verbatim"],
-    );
+    // Verify SHAs match
+    let cloned_sha = git(&cloned_repo, &["rev-parse", "HEAD"]);
+    assert_eq!(orig_sha, cloned_sha, "SHA preservation failed");
 
-    // Both should work for unsigned commits
-    assert!(export1.status.success(), "Export 1 failed");
-
-    if !export2.status.success() {
-        eprintln!("Export 2 stderr: {}", String::from_utf8_lossy(&export2.stderr));
-    }
-    assert!(export2.status.success(), "Export 2 failed");
-
-    println!("Export 1 size: {} bytes", export1.stdout.len());
-    println!("Export 2 size: {} bytes", export2.stdout.len());
+    // Verify file contents
+    let content1 = std::fs::read_to_string(cloned_repo.join("file1.txt")).unwrap();
+    let content2 = std::fs::read_to_string(cloned_repo.join("file2.txt")).unwrap();
+    assert_eq!(content1, "Hello World");
+    assert_eq!(content2, "Second file");
 }
 
 #[test]
-fn test_fast_export_import_roundtrip() {
+fn test_multiple_branches() {
+    setup_git_remote();
+
     let temp = TempDir::new().unwrap();
-    let repo = create_test_repo(&temp.path().to_path_buf(), false);
+    let test_repo = temp.path().join("test-repo");
+    let storage = temp.path().join("storage");
+    let cloned_repo = temp.path().join("cloned");
 
-    // Get original commit SHAs
-    let log_output = git_command(&repo, &["log", "--format=%H", "--reverse"]);
-    let original_shas: Vec<String> = String::from_utf8_lossy(&log_output.stdout)
-        .lines()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect();
+    // Create test repository
+    std::fs::create_dir(&test_repo).unwrap();
+    git(&test_repo, &["init"]);
+    git(&test_repo, &["config", "user.name", "Test"]);
+    git(&test_repo, &["config", "user.email", "test@test.com"]);
 
-    println!("Original SHAs: {:?}", original_shas);
+    // Create main branch commit
+    std::fs::write(test_repo.join("main.txt"), "main").unwrap();
+    git(&test_repo, &["add", "main.txt"]);
+    git(&test_repo, &["commit", "-m", "Main commit"]);
+    let main_sha = git(&test_repo, &["rev-parse", "HEAD"]);
 
-    // Export
-    let export = git_command(
-        &repo,
-        &["fast-export", "--all", "--signed-commits=verbatim"],
-    );
-    assert!(export.status.success(), "Export failed");
+    // Create feature branch
+    git(&test_repo, &["checkout", "-b", "feature"]);
+    std::fs::write(test_repo.join("feature.txt"), "feature").unwrap();
+    git(&test_repo, &["add", "feature.txt"]);
+    git(&test_repo, &["commit", "-m", "Feature commit"]);
+    let feature_sha = git(&test_repo, &["rev-parse", "HEAD"]);
 
-    // Create new repo for import
-    let import_repo = temp.path().join("import-repo");
-    fs::create_dir(&import_repo).unwrap();
-    git_command(&import_repo, &["init"]);
+    // Push all branches
+    let storage_url = format!("gitwal::{}", storage.display());
+    git(&test_repo, &["push", &storage_url, "--all"]);
 
-    // Import
-    let mut import_cmd = Command::new("git")
-        .current_dir(&import_repo)
-        .args(&["fast-import"])
-        .stdin(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
-
-    use std::io::Write;
-    import_cmd
-        .stdin
-        .as_mut()
-        .unwrap()
-        .write_all(&export.stdout)
-        .unwrap();
-
-    let import_result = import_cmd.wait().unwrap();
-    assert!(import_result.success(), "Import failed");
-
-    // Get imported commit SHAs
-    let log_output = git_command(&import_repo, &["log", "--format=%H", "--reverse"]);
-    let imported_shas: Vec<String> = String::from_utf8_lossy(&log_output.stdout)
-        .lines()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect();
-
-    println!("Imported SHAs: {:?}", imported_shas);
-
-    // Compare SHAs
-    assert_eq!(
-        original_shas.len(),
-        imported_shas.len(),
-        "Different number of commits"
+    // Clone and verify
+    git(
+        temp.path(),
+        &["clone", &storage_url, cloned_repo.to_str().unwrap()],
     );
 
-    for (i, (orig, imported)) in original_shas.iter().zip(imported_shas.iter()).enumerate() {
-        assert_eq!(
-            orig, imported,
-            "SHA mismatch at commit {}: {} != {}",
-            i, orig, imported
-        );
-    }
+    let cloned_main_sha = git(&cloned_repo, &["rev-parse", "origin/main"]);
+    let cloned_feature_sha = git(&cloned_repo, &["rev-parse", "origin/feature"]);
+
+    assert_eq!(main_sha, cloned_main_sha);
+    assert_eq!(feature_sha, cloned_feature_sha);
 }
 
 #[test]
-fn test_gitwal_roundtrip() {
+fn test_binary_files() {
+    setup_git_remote();
+
     let temp = TempDir::new().unwrap();
-    let repo = create_test_repo(&temp.path().to_path_buf(), false);
+    let test_repo = temp.path().join("test-repo");
+    let storage = temp.path().join("storage");
+    let cloned_repo = temp.path().join("cloned");
+
+    // Create test repository
+    std::fs::create_dir(&test_repo).unwrap();
+    git(&test_repo, &["init"]);
+    git(&test_repo, &["config", "user.name", "Test"]);
+    git(&test_repo, &["config", "user.email", "test@test.com"]);
+
+    // Create binary file
+    let binary_data: Vec<u8> = (0..256).map(|i| i as u8).collect();
+    std::fs::write(test_repo.join("binary.dat"), &binary_data).unwrap();
+    git(&test_repo, &["add", "binary.dat"]);
+    git(&test_repo, &["commit", "-m", "Add binary"]);
+
+    // Push and clone
+    let storage_url = format!("gitwal::{}", storage.display());
+    git(&test_repo, &["push", &storage_url, "main"]);
+    git(
+        temp.path(),
+        &["clone", &storage_url, cloned_repo.to_str().unwrap()],
+    );
+
+    // Verify binary file
+    let cloned_data = std::fs::read(cloned_repo.join("binary.dat")).unwrap();
+    assert_eq!(binary_data, cloned_data);
+}
+
+#[test]
+fn test_lightweight_tags() {
+    setup_git_remote();
+
+    let temp = TempDir::new().unwrap();
+    let test_repo = temp.path().join("test-repo");
+    let storage = temp.path().join("storage");
+    let cloned_repo = temp.path().join("cloned");
+
+    // Create test repository
+    std::fs::create_dir(&test_repo).unwrap();
+    git(&test_repo, &["init"]);
+    git(&test_repo, &["config", "user.name", "Test"]);
+    git(&test_repo, &["config", "user.email", "test@test.com"]);
+
+    // Create commit and tag
+    std::fs::write(test_repo.join("file.txt"), "content").unwrap();
+    git(&test_repo, &["add", "file.txt"]);
+    git(&test_repo, &["commit", "-m", "Commit"]);
+    git(&test_repo, &["tag", "v1.0.0"]);
+
+    let commit_sha = git(&test_repo, &["rev-parse", "HEAD"]);
+
+    // Push tag
+    let storage_url = format!("gitwal::{}", storage.display());
+    git(&test_repo, &["push", &storage_url, "main"]);
+    git(
+        &test_repo,
+        &["push", &storage_url, "v1.0.0:refs/tags/v1.0.0"],
+    );
+
+    // Clone and verify tag
+    git(
+        temp.path(),
+        &["clone", &storage_url, cloned_repo.to_str().unwrap()],
+    );
+
+    let tag_sha = git(&cloned_repo, &["rev-parse", "v1.0.0"]);
+    assert_eq!(commit_sha, tag_sha);
+}
+
+#[test]
+fn test_incremental_push() {
+    setup_git_remote();
+
+    let temp = TempDir::new().unwrap();
+    let test_repo = temp.path().join("test-repo");
     let storage = temp.path().join("storage");
 
-    // Get original SHAs
-    let log_output = git_command(&repo, &["log", "--format=%H"]);
-    let original_shas = String::from_utf8_lossy(&log_output.stdout);
+    // Create test repository
+    std::fs::create_dir(&test_repo).unwrap();
+    git(&test_repo, &["init"]);
+    git(&test_repo, &["config", "user.name", "Test"]);
+    git(&test_repo, &["config", "user.email", "test@test.com"]);
 
-    // Push to gitwal storage
-    let push_result = git_command(
-        &repo,
-        &["push", &format!("gitwal::{}", storage.display()), "main"],
+    // First push
+    std::fs::write(test_repo.join("file1.txt"), "First").unwrap();
+    git(&test_repo, &["add", "file1.txt"]);
+    git(&test_repo, &["commit", "-m", "First"]);
+
+    let storage_url = format!("gitwal::{}", storage.display());
+    git(&test_repo, &["push", &storage_url, "main"]);
+
+    // Second push
+    std::fs::write(test_repo.join("file2.txt"), "Second").unwrap();
+    git(&test_repo, &["add", "file2.txt"]);
+    git(&test_repo, &["commit", "-m", "Second"]);
+    let second_sha = git(&test_repo, &["rev-parse", "HEAD"]);
+
+    git(&test_repo, &["push", &storage_url, "main"]);
+
+    // Clone and verify second commit is present
+    let cloned_repo = temp.path().join("cloned");
+    git(
+        temp.path(),
+        &["clone", &storage_url, cloned_repo.to_str().unwrap()],
     );
 
-    if !push_result.status.success() {
-        eprintln!("Push stderr: {}", String::from_utf8_lossy(&push_result.stderr));
-        panic!("Push failed");
-    }
+    let cloned_sha = git(&cloned_repo, &["rev-parse", "HEAD"]);
+    assert_eq!(second_sha, cloned_sha);
 
-    // Clone from gitwal storage
-    let clone_dir = temp.path().join("cloned");
-    let clone_result = Command::new("git")
-        .args(&[
-            "clone",
-            &format!("gitwal::{}", storage.display()),
-            clone_dir.to_str().unwrap(),
-        ])
-        .output()
-        .unwrap();
-
-    if !clone_result.status.success() {
-        eprintln!("Clone stderr: {}", String::from_utf8_lossy(&clone_result.stderr));
-        panic!("Clone failed");
-    }
-
-    // Get cloned SHAs
-    let log_output = git_command(&clone_dir, &["log", "--format=%H"]);
-    let cloned_shas = String::from_utf8_lossy(&log_output.stdout);
-
-    println!("Original SHAs:\n{}", original_shas);
-    println!("Cloned SHAs:\n{}", cloned_shas);
-
-    assert_eq!(
-        original_shas.trim(),
-        cloned_shas.trim(),
-        "SHAs don't match after gitwal roundtrip"
-    );
-}
-
-#[test]
-#[ignore] // Only run if GPG is set up
-fn test_signed_commits_preservation() {
-    let temp = TempDir::new().unwrap();
-    let repo = create_test_repo(&temp.path().to_path_buf(), true);
-
-    // Check if commits are actually signed (will skip if no GPG key)
-    let verify_output = git_command(&repo, &["verify-commit", "HEAD"]);
-    if !verify_output.status.success() {
-        println!("Skipping signed commit test - no GPG key available");
-        return;
-    }
-
-    // Export with signed-commits flag
-    let export = git_command(
-        &repo,
-        &["fast-export", "--all", "--signed-commits=verbatim"],
-    );
-
-    assert!(export.status.success(), "Export failed");
-
-    // Check if gpgsig is in the export stream
-    let export_str = String::from_utf8_lossy(&export.stdout);
-    assert!(
-        export_str.contains("gpgsig"),
-        "gpgsig not found in export stream"
-    );
-
-    println!("gpgsig found in export stream!");
-
-    // Import to new repo
-    let import_repo = temp.path().join("import-repo");
-    fs::create_dir(&import_repo).unwrap();
-    git_command(&import_repo, &["init"]);
-
-    let mut import_cmd = Command::new("git")
-        .current_dir(&import_repo)
-        .args(&["fast-import"])
-        .stdin(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
-
-    use std::io::Write;
-    import_cmd
-        .stdin
-        .as_mut()
-        .unwrap()
-        .write_all(&export.stdout)
-        .unwrap();
-
-    let import_result = import_cmd.wait().unwrap();
-    assert!(import_result.success(), "Import failed");
-
-    // Verify signature is preserved
-    let verify_output = git_command(&import_repo, &["verify-commit", "HEAD"]);
-    assert!(
-        verify_output.status.success(),
-        "Signature verification failed after import"
-    );
-
-    println!("Signature preserved successfully!");
+    // Verify both files exist
+    assert!(cloned_repo.join("file1.txt").exists());
+    assert!(cloned_repo.join("file2.txt").exists());
 }

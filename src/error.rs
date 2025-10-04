@@ -1,6 +1,7 @@
 use std::fmt;
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub enum Error {
     Io(std::io::Error),
     Yaml(serde_yaml::Error),

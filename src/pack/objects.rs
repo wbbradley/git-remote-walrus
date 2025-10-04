@@ -18,6 +18,7 @@ pub struct GitObject {
 
 impl GitObject {
     /// Create a GitObject from raw object data (without header)
+    #[allow(dead_code)]
     pub fn from_raw(kind: Kind, data: Vec<u8>) -> Result<Self> {
         let id = compute_object_id(kind, &data)?;
         Ok(Self { id, kind, data })
@@ -68,6 +69,7 @@ impl GitObject {
     }
 
     /// Get the object data without header
+    #[allow(dead_code)]
     pub fn data(&self) -> &[u8] {
         &self.data
     }

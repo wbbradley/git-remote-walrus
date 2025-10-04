@@ -15,6 +15,7 @@ pub trait ImmutableStore {
     /// Write multiple objects in a batch operation.
     /// Returns content identifiers in the same order as inputs.
     /// More efficient than multiple write_object calls for some backends.
+    #[allow(dead_code)]
     fn write_objects(&self, contents: &[&[u8]]) -> Result<Vec<ContentId>>;
 
     /// Read object by content identifier into memory.
@@ -24,13 +25,16 @@ pub trait ImmutableStore {
     /// Read multiple objects in a batch operation.
     /// Returns objects in the same order as requested ids.
     /// Returns error if any object doesn't exist.
+    #[allow(dead_code)]
     fn read_objects(&self, ids: &[&str]) -> Result<Vec<Vec<u8>>>;
 
     /// Delete object by content identifier.
     /// Returns Ok(()) even if object didn't exist.
+    #[allow(dead_code)]
     fn delete_object(&self, id: &str) -> Result<()>;
 
     /// Check if object exists by identifier.
+    #[allow(dead_code)]
     fn object_exists(&self, id: &str) -> Result<bool>;
 }
 

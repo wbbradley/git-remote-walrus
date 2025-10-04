@@ -8,6 +8,5 @@ pub mod objects;
 pub mod receive;
 pub mod send;
 
-pub use objects::{GitObject, ObjectId};
 pub use receive::receive_pack;
 pub use send::send_pack;

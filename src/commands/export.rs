@@ -32,7 +32,7 @@ pub fn handle<S: StorageBackend, W: Write, R: BufRead>(
     eprintln!("git-remote-gitwal: Ref updates from Git: {:?}", ref_updates);
 
     // For each ref being pushed, get the commit SHA
-    for (refname, _git_sha1) in &ref_updates {
+    for refname in ref_updates.keys() {
         eprintln!("git-remote-gitwal: Processing ref {}", refname);
 
         // Get the commit SHA that this ref points to locally

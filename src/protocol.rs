@@ -12,6 +12,7 @@ pub fn handle_commands<S: StorageBackend>(storage: S) -> Result<()> {
 
     let mut lines = reader.lines();
 
+    #[allow(clippy::while_let_on_iterator)]
     while let Some(line) = lines.next() {
         let line = line?;
         let line = line.trim();
@@ -71,6 +72,7 @@ pub fn handle_commands<S: StorageBackend>(storage: S) -> Result<()> {
 fn read_fetch_refs<R: BufRead>(lines: &mut std::io::Lines<R>) -> Result<Vec<String>> {
     let mut refs = Vec::new();
 
+    #[allow(clippy::while_let_on_iterator)]
     while let Some(line) = lines.next() {
         let line = line?;
         let line = line.trim();
@@ -96,6 +98,7 @@ fn read_fetch_refs<R: BufRead>(lines: &mut std::io::Lines<R>) -> Result<Vec<Stri
 fn read_import_refs<R: BufRead>(lines: &mut std::io::Lines<R>) -> Result<Vec<String>> {
     let mut refs = Vec::new();
 
+    #[allow(clippy::while_let_on_iterator)]
     while let Some(line) = lines.next() {
         let line = line?;
         let line = line.trim();

@@ -27,7 +27,7 @@ pub fn send_pack<W: Write>(
     let state = storage.read_state()?;
 
     // Collect object IDs for all wanted refs
-    let wanted_objects = collect_wanted_objects(&wanted_refs, &state)?;
+    let wanted_objects = collect_wanted_objects(wanted_refs, &state)?;
     eprintln!("Need to send {} objects", wanted_objects.len());
 
     if wanted_objects.is_empty() {
@@ -98,7 +98,7 @@ fn collect_wanted_objects(wanted_refs: &[String], state: &State) -> Result<Vec<O
 }
 
 /// Initialize minimal bare repository structure
-fn init_bare_repo(git_dir: &PathBuf) -> Result<()> {
+fn init_bare_repo(git_dir: &std::path::Path) -> Result<()> {
     std::fs::create_dir_all(git_dir.join("objects"))
         .context("Failed to create objects dir")?;
     std::fs::create_dir_all(git_dir.join("refs"))

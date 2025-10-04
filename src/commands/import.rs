@@ -1,6 +1,5 @@
 use anyhow::{Context, Result};
 use std::io::Write;
-use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use tempfile::TempDir;
 
@@ -49,7 +48,7 @@ pub fn handle<S: StorageBackend, W: Write>(
     }
 
     // Use git fast-export to generate stream
-    let mut fast_export = Command::new("git")
+    let fast_export = Command::new("git")
         .arg("--git-dir")
         .arg(&git_dir)
         .arg("fast-export")
@@ -79,7 +78,7 @@ pub fn handle<S: StorageBackend, W: Write>(
 }
 
 /// Initialize minimal bare repository structure
-fn init_bare_repo(git_dir: &PathBuf) -> Result<()> {
+fn init_bare_repo(git_dir: &std::path::Path) -> Result<()> {
     std::fs::create_dir_all(git_dir.join("objects"))
         .context("Failed to create objects dir")?;
     std::fs::create_dir_all(git_dir.join("refs"))

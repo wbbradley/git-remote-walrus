@@ -20,6 +20,7 @@ pub fn handle<S: StorageBackend, W: Write, R: BufRead>(
     // Read push commands until empty line
     let mut ref_updates = Vec::new();
 
+    #[allow(clippy::while_let_on_iterator)]
     while let Some(line) = lines.next() {
         let line = line?;
         let line_trimmed = line.trim();

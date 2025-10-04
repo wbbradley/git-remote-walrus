@@ -2,7 +2,6 @@
 
 use anyhow::{Context, Result};
 use std::io::{Read, Write};
-use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use tempfile::TempDir;
 
@@ -90,7 +89,7 @@ pub fn receive_pack<R: Read>(
 }
 
 /// Initialize minimal bare repository structure
-fn init_bare_repo(git_dir: &PathBuf) -> Result<()> {
+fn init_bare_repo(git_dir: &std::path::Path) -> Result<()> {
     std::fs::create_dir_all(git_dir.join("objects"))
         .context("Failed to create objects dir")?;
     std::fs::create_dir_all(git_dir.join("refs"))
@@ -104,7 +103,7 @@ fn init_bare_repo(git_dir: &PathBuf) -> Result<()> {
 }
 
 /// Collect all loose objects from a git objects directory
-fn collect_loose_objects(git_dir: &PathBuf) -> Result<Vec<GitObject>> {
+fn collect_loose_objects(git_dir: &std::path::Path) -> Result<Vec<GitObject>> {
     let objects_dir = git_dir.join("objects");
     let mut objects = Vec::new();
 
