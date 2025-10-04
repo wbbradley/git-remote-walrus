@@ -17,7 +17,7 @@ pub fn handle<S: StorageBackend, W: Write>(
     output: &mut W,
     refs: &[String],
 ) -> Result<()> {
-    eprintln!("git-remote-gitwal: Fetch requested for refs: {:?}", refs);
+    eprintln!("git-remote-walrus: Fetch requested for refs: {:?}", refs);
 
     // Create packfile in memory
     let mut packfile = Vec::new();
@@ -61,6 +61,6 @@ pub fn handle<S: StorageBackend, W: Write>(
     writeln!(output)?;
     output.flush()?;
 
-    eprintln!("git-remote-gitwal: Fetch completed");
+    eprintln!("git-remote-walrus: Fetch completed");
     Ok(())
 }

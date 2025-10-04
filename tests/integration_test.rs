@@ -1,6 +1,6 @@
-//! End-to-end integration tests for git-remote-gitwal
+//! End-to-end integration tests for git-remote-walrus
 //!
-//! These tests require the git-remote-gitwal binary to be built.
+//! These tests require the git-remote-walrus binary to be built.
 //! Run with: cargo test --release
 
 use std::path::{Path, PathBuf};
@@ -10,7 +10,7 @@ use tempfile::TempDir;
 
 static INIT: Once = Once::new();
 
-/// Setup git-remote-gitwal in PATH for tests
+/// Setup git-remote-walrus in PATH for tests
 /// This ensures Git can find our custom remote helper
 fn setup_git_remote() {
     INIT.call_once(|| {
@@ -18,10 +18,10 @@ fn setup_git_remote() {
         let binary_path = PathBuf::from(manifest_dir).join("target/release");
 
         // Verify the binary exists
-        let binary = binary_path.join("git-remote-gitwal");
+        let binary = binary_path.join("git-remote-walrus");
         if !binary.exists() {
             panic!(
-                "git-remote-gitwal binary not found at: {}\n\
+                "git-remote-walrus binary not found at: {}\n\
                  Please build it first with: cargo build --release",
                 binary.display()
             );
@@ -32,7 +32,7 @@ fn setup_git_remote() {
         let new_path = format!("{}:{}", binary_path.display(), current_path);
         std::env::set_var("PATH", new_path);
 
-        eprintln!("✓ git-remote-gitwal added to PATH for testing");
+        eprintln!("✓ git-remote-walrus added to PATH for testing");
     });
 }
 
@@ -74,11 +74,11 @@ fn test_basic_push_clone() {
 
     let orig_sha = git(&test_repo, &["rev-parse", "HEAD"]);
 
-    // Push to gitwal
-    let storage_url = format!("gitwal::{}", storage.display());
+    // Push to walrus
+    let storage_url = format!("walrus::{}", storage.display());
     git(&test_repo, &["push", &storage_url, "main"]);
 
-    // Clone from gitwal
+    // Clone from walrus
     git(
         temp.path(),
         &["clone", &storage_url, cloned_repo.to_str().unwrap()],
@@ -124,7 +124,7 @@ fn test_multiple_branches() {
     let feature_sha = git(&test_repo, &["rev-parse", "HEAD"]);
 
     // Push all branches
-    let storage_url = format!("gitwal::{}", storage.display());
+    let storage_url = format!("walrus::{}", storage.display());
     git(&test_repo, &["push", &storage_url, "--all"]);
 
     // Clone and verify
@@ -162,7 +162,7 @@ fn test_binary_files() {
     git(&test_repo, &["commit", "-m", "Add binary"]);
 
     // Push and clone
-    let storage_url = format!("gitwal::{}", storage.display());
+    let storage_url = format!("walrus::{}", storage.display());
     git(&test_repo, &["push", &storage_url, "main"]);
     git(
         temp.path(),
@@ -198,7 +198,7 @@ fn test_lightweight_tags() {
     let commit_sha = git(&test_repo, &["rev-parse", "HEAD"]);
 
     // Push tag
-    let storage_url = format!("gitwal::{}", storage.display());
+    let storage_url = format!("walrus::{}", storage.display());
     git(&test_repo, &["push", &storage_url, "main"]);
     git(
         &test_repo,
@@ -234,7 +234,7 @@ fn test_incremental_push() {
     git(&test_repo, &["add", "file1.txt"]);
     git(&test_repo, &["commit", "-m", "First"]);
 
-    let storage_url = format!("gitwal::{}", storage.display());
+    let storage_url = format!("walrus::{}", storage.display());
     git(&test_repo, &["push", &storage_url, "main"]);
 
     // Second push

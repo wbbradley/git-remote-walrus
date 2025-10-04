@@ -1,4 +1,4 @@
-//! Git pack format support for gitwal
+//! Git pack format support for walrus
 //!
 //! This module handles Git's native pack format for push/fetch operations,
 //! replacing the fast-import/fast-export approach to preserve GPG signatures

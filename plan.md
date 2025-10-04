@@ -1,6 +1,6 @@
 # Git Remote Helper - Implementation Status & Next Steps
 
-## Project: git-remote-gitwal
+## Project: git-remote-walrus
 
 ### Overview
 A custom Git remote helper that stores data in a content-addressed, immutable storage system. The remote helper enables Git to push/pull repositories to/from a custom storage backend that enforces immutability constraints.
@@ -35,8 +35,8 @@ A custom Git remote helper that stores data in a content-addressed, immutable st
 ```
 
 **Working Features:**
-- ✅ Push repositories to gitwal storage
-- ✅ Clone repositories from gitwal storage
+- ✅ Push repositories to walrus storage
+- ✅ Clone repositories from walrus storage
 - ✅ Content and commit messages preserved
 - ✅ File contents correctly stored and retrieved
 - ✅ Multiple commits and history preserved
@@ -261,10 +261,10 @@ fn collect_objects(
 **Verification:**
 ```bash
 # Push repo
-git push gitwal::/tmp/storage main
+git push walrus::/tmp/storage main
 
 # Clone repo
-git clone gitwal::/tmp/storage /tmp/test
+git clone walrus::/tmp/storage /tmp/test
 
 # Verify SHAs match exactly
 cd /tmp/test
@@ -452,11 +452,11 @@ git config user.signingkey <key-id>
 git commit --allow-empty -S -m "Signed commit 1"
 git commit --allow-empty -S -m "Signed commit 2"
 
-# Push to gitwal
-git push gitwal::/tmp/storage main
+# Push to walrus
+git push walrus::/tmp/storage main
 
 # Clone and verify
-git clone gitwal::/tmp/storage /tmp/cloned
+git clone walrus::/tmp/storage /tmp/cloned
 cd /tmp/cloned
 
 # Verify signatures preserved
@@ -476,21 +476,21 @@ git rev-parse HEAD
 a. **Lightweight tags:**
 ```bash
 git tag v1.0.0
-git push gitwal::/tmp/storage --tags
+git push walrus::/tmp/storage --tags
 # Verify tag points to correct commit after clone
 ```
 
 b. **Annotated tags:**
 ```bash
 git tag -a v2.0.0 -m "Release 2.0"
-git push gitwal::/tmp/storage --tags
+git push walrus::/tmp/storage --tags
 # Verify tag message preserved
 ```
 
 c. **Signed tags:**
 ```bash
 git tag -s v3.0.0 -m "Signed release"
-git push gitwal::/tmp/storage --tags
+git push walrus::/tmp/storage --tags
 # Verify signature preserved
 git verify-tag v3.0.0
 ```
@@ -504,10 +504,10 @@ git checkout -b feature-2
 git commit -m "Feature 2"
 
 # Push all branches
-git push gitwal::/tmp/storage --all
+git push walrus::/tmp/storage --all
 
 # Clone and verify all branches present
-git clone gitwal::/tmp/storage /tmp/test
+git clone walrus::/tmp/storage /tmp/test
 cd /tmp/test
 git branch -a
 # Should show all branches
@@ -520,9 +520,9 @@ git checkout main
 git merge feature-1
 
 # Push and verify merge commit preserved
-git push gitwal::/tmp/storage main
+git push walrus::/tmp/storage main
 # Clone and check merge structure
-git clone gitwal::/tmp/storage /tmp/test
+git clone walrus::/tmp/storage /tmp/test
 cd /tmp/test
 git log --graph --oneline
 # Verify merge structure correct
@@ -533,14 +533,14 @@ git log --graph --oneline
 
 ```bash
 # Initial push
-git push gitwal::/tmp/storage main
+git push walrus::/tmp/storage main
 # Note object count
 
 # Add new commit
 git commit --allow-empty -m "New commit"
 
 # Push again
-git push gitwal::/tmp/storage main
+git push walrus::/tmp/storage main
 # Verify only 1 new object stored (the commit)
 # Check storage backend for object count
 ```
@@ -566,8 +566,8 @@ git add binary.dat
 git commit -m "Add binary"
 
 # Push and clone
-git push gitwal::/tmp/storage main
-git clone gitwal::/tmp/storage /tmp/test
+git push walrus::/tmp/storage main
+git clone walrus::/tmp/storage /tmp/test
 
 # Verify binary identical
 diff binary.dat /tmp/test/binary.dat

@@ -24,16 +24,16 @@ pub fn handle<S: StorageBackend, W: Write, R: BufRead>(
             // Fast-export failed or returned no updates
             // This can happen with annotated tags
             // Fall back to using git show-ref to get all refs that need pushing
-            eprintln!("git-remote-gitwal: Fast-export failed or empty, using fallback method");
+            eprintln!("git-remote-walrus: Fast-export failed or empty, using fallback method");
             get_refs_from_git()?
         }
     };
 
-    eprintln!("git-remote-gitwal: Ref updates from Git: {:?}", ref_updates);
+    eprintln!("git-remote-walrus: Ref updates from Git: {:?}", ref_updates);
 
     // For each ref being pushed, get the commit SHA
     for refname in ref_updates.keys() {
-        eprintln!("git-remote-gitwal: Processing ref {}", refname);
+        eprintln!("git-remote-walrus: Processing ref {}", refname);
 
         // Get the commit SHA that this ref points to locally
         let sha_output = Command::new("git")
@@ -43,12 +43,12 @@ pub fn handle<S: StorageBackend, W: Write, R: BufRead>(
             .context("Failed to run git rev-parse")?;
 
         if !sha_output.status.success() {
-            eprintln!("git-remote-gitwal: Could not resolve ref {}", refname);
+            eprintln!("git-remote-walrus: Could not resolve ref {}", refname);
             continue;
         }
 
         let git_sha1 = String::from_utf8_lossy(&sha_output.stdout).trim().to_string();
-        eprintln!("git-remote-gitwal: Ref {} points to {}", refname, git_sha1);
+        eprintln!("git-remote-walrus: Ref {} points to {}", refname, git_sha1);
 
         // Create a packfile containing all objects for this ref
         // Use git pack-objects to create the packfile
@@ -62,7 +62,7 @@ pub fn handle<S: StorageBackend, W: Write, R: BufRead>(
             git_sha1.clone()
         };
 
-        eprintln!("git-remote-gitwal: Creating packfile for {}", rev_range);
+        eprintln!("git-remote-walrus: Creating packfile for {}", rev_range);
 
         // Use git pack-objects --include-tag to include annotated tag objects
         let mut pack_output = Command::new("git")
@@ -88,14 +88,14 @@ pub fn handle<S: StorageBackend, W: Write, R: BufRead>(
             anyhow::bail!("git pack-objects failed");
         }
 
-        eprintln!("git-remote-gitwal: Created packfile of {} bytes", pack_result.stdout.len());
+        eprintln!("git-remote-walrus: Created packfile of {} bytes", pack_result.stdout.len());
 
         // Receive and store the packfile
         let mut pack_data = &pack_result.stdout[..];
         let object_mappings = receive_pack(&mut pack_data, storage)
             .context("Failed to receive pack")?;
 
-        eprintln!("git-remote-gitwal: Stored {} objects", object_mappings.len());
+        eprintln!("git-remote-walrus: Stored {} objects", object_mappings.len());
 
         // Update state with new objects and ref
         storage.update_state(|state| {

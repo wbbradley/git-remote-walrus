@@ -1,10 +1,10 @@
-# git-remote-gitwal
+# git-remote-walrus
 
 A custom Git remote helper that stores repository data in a content-addressed, immutable storage system.
 
 ## Overview
 
-`git-remote-gitwal` is a Git remote helper that implements the `gitwal::` protocol, allowing you to push and pull Git repositories to/from a custom storage backend that enforces immutability constraints.
+`git-remote-walrus` is a Git remote helper that implements the `walrus::` protocol, allowing you to push and pull Git repositories to/from a custom storage backend that enforces immutability constraints.
 
 ## Features
 
@@ -19,7 +19,7 @@ Build and install the binary:
 
 ```bash
 cargo build --release
-sudo cp target/release/git-remote-gitwal /usr/local/bin/
+sudo cp target/release/git-remote-walrus /usr/local/bin/
 ```
 
 Or just run from the target directory:
@@ -31,7 +31,7 @@ export PATH="$PWD/target/release:$PATH"
 
 ## Usage
 
-### Push to a gitwal remote
+### Push to a walrus remote
 
 ```bash
 # Create a test repository
@@ -41,15 +41,15 @@ echo "Hello, World!" > file.txt
 git add .
 git commit -m "Initial commit"
 
-# Add gitwal remote and push
-git remote add storage gitwal::/tmp/mystorage
+# Add walrus remote and push
+git remote add storage walrus::/tmp/mystorage
 git push storage main
 ```
 
-### Clone from a gitwal remote
+### Clone from a walrus remote
 
 ```bash
-git clone gitwal::/tmp/mystorage myclone
+git clone walrus::/tmp/mystorage myclone
 cd myclone
 # Your repository is now cloned!
 ```
@@ -130,7 +130,7 @@ The tool logs to stderr, so you can see debug output while Git communicates via 
 
 ### Push Flow
 
-1. Git spawns `git-remote-gitwal gitwal::/path/to/storage`
+1. Git spawns `git-remote-walrus walrus::/path/to/storage`
 2. Git sends commands via stdin (capabilities, list, export)
 3. Helper reads fast-export stream from Git
 4. Helper stores stream as immutable object (SHA-256 addressed)

@@ -13,7 +13,7 @@ pub fn handle<S: StorageBackend, W: Write>(
     output: &mut W,
     refs: &[String],
 ) -> Result<()> {
-    eprintln!("git-remote-gitwal: Import requested for refs: {:?}", refs);
+    eprintln!("git-remote-walrus: Import requested for refs: {:?}", refs);
 
     let state = storage.read_state()?;
 

@@ -1,10 +1,10 @@
 [package]
-name = "git-remote-gitwal"
+name = "git-remote-walrus"
 version = "0.1.0"
 edition = "2021"
 
 [[bin]]
-name = "git-remote-gitwal"
+name = "git-remote-walrus"
 path = "src/main.rs"
 
 [dependencies]

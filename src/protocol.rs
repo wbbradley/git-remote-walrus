@@ -18,7 +18,7 @@ pub fn handle_commands<S: StorageBackend>(storage: S) -> Result<()> {
         let line = line.trim();
 
         // Log commands to stderr for debugging
-        eprintln!("git-remote-gitwal: Received command: {}", line);
+        eprintln!("git-remote-walrus: Received command: {}", line);
 
         if line.is_empty() {
             continue;
@@ -58,7 +58,7 @@ pub fn handle_commands<S: StorageBackend>(storage: S) -> Result<()> {
                 break;
             }
             cmd => {
-                eprintln!("git-remote-gitwal: Unknown command: {}", cmd);
+                eprintln!("git-remote-walrus: Unknown command: {}", cmd);
             }
         }
 
