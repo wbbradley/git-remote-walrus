@@ -1,3 +1,4 @@
+#![deny(clippy::mod_module_files)]
 use anyhow::Result;
 use std::env;
 use std::path::PathBuf;
