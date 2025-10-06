@@ -17,6 +17,7 @@ flate2 = "1.1.2"
 sha1 = "0.10.6"
 gix-object = "0.50.2"
 tempfile = "3.23.0"
+serde_json = "1.0.145"
 
 [dev-dependencies]
 tempfile = "3.23.0"

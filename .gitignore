@@ -1,1 +1,4 @@
 target/
+
+# Sui Move build artifacts
+move/walrus_remote/build/
