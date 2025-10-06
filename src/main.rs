@@ -4,14 +4,16 @@ use std::env;
 use std::path::PathBuf;
 
 mod commands;
+mod config;
 mod error;
 mod git;
 mod pack;
 mod protocol;
 mod storage;
+mod sui;
 mod walrus;
 
-use storage::{FilesystemStorage, StorageBackend};
+use storage::{FilesystemStorage, StorageBackend, WalrusStorage};
 
 /// Remote storage backend type
 enum RemoteType {
@@ -23,8 +25,7 @@ enum RemoteType {
 /// This allows us to use different storage types with the protocol handler
 enum Storage {
     Filesystem(FilesystemStorage),
-    // TODO: Add WalrusStorage variant when implemented
-    // Walrus(WalrusStorage),
+    Walrus(WalrusStorage),
 }
 
 // Implement StorageBackend traits for Storage enum by delegating to inner types
@@ -32,36 +33,42 @@ impl storage::ImmutableStore for Storage {
     fn write_object(&self, content: &[u8]) -> Result<String> {
         match self {
             Storage::Filesystem(s) => s.write_object(content),
+            Storage::Walrus(s) => s.write_object(content),
         }
     }
 
     fn write_objects(&self, contents: &[&[u8]]) -> Result<Vec<String>> {
         match self {
             Storage::Filesystem(s) => s.write_objects(contents),
+            Storage::Walrus(s) => s.write_objects(contents),
         }
     }
 
     fn read_object(&self, id: &str) -> Result<Vec<u8>> {
         match self {
             Storage::Filesystem(s) => s.read_object(id),
+            Storage::Walrus(s) => s.read_object(id),
         }
     }
 
     fn read_objects(&self, ids: &[&str]) -> Result<Vec<Vec<u8>>> {
         match self {
             Storage::Filesystem(s) => s.read_objects(ids),
+            Storage::Walrus(s) => s.read_objects(ids),
         }
     }
 
     fn delete_object(&self, id: &str) -> Result<()> {
         match self {
             Storage::Filesystem(s) => s.delete_object(id),
+            Storage::Walrus(s) => s.delete_object(id),
         }
     }
 
     fn object_exists(&self, id: &str) -> Result<bool> {
         match self {
             Storage::Filesystem(s) => s.object_exists(id),
+            Storage::Walrus(s) => s.object_exists(id),
         }
     }
 }
@@ -70,12 +77,14 @@ impl storage::MutableState for Storage {
     fn read_state(&self) -> Result<storage::State> {
         match self {
             Storage::Filesystem(s) => s.read_state(),
+            Storage::Walrus(s) => s.read_state(),
         }
     }
 
     fn write_state(&self, state: &storage::State) -> Result<()> {
         match self {
             Storage::Filesystem(s) => s.write_state(state),
+            Storage::Walrus(s) => s.write_state(state),
         }
     }
 
@@ -85,6 +94,7 @@ impl storage::MutableState for Storage {
     {
         match self {
             Storage::Filesystem(s) => s.update_state(update_fn),
+            Storage::Walrus(s) => s.update_state(update_fn),
         }
     }
 }
@@ -93,6 +103,7 @@ impl StorageBackend for Storage {
     fn initialize(&self) -> Result<()> {
         match self {
             Storage::Filesystem(s) => s.initialize(),
+            Storage::Walrus(s) => s.initialize(),
         }
     }
 }
@@ -129,9 +140,9 @@ fn main() -> Result<()> {
             Storage::Filesystem(fs_storage)
         }
         RemoteType::Sui(object_id) => {
-            eprintln!("git-remote-walrus: Using Sui storage: {}", object_id);
-            // TODO: Implement WalrusStorage
-            anyhow::bail!("Sui storage backend not yet implemented. Object ID: {}", object_id);
+            eprintln!("git-remote-walrus: Using Walrus+Sui storage: {}", object_id);
+            let walrus_storage = WalrusStorage::new(object_id)?;
+            Storage::Walrus(walrus_storage)
         }
     };
 

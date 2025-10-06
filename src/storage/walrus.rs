@@ -1,0 +1,386 @@
+use anyhow::{Context, Result};
+use sha2::{Digest, Sha256};
+use std::path::PathBuf;
+use std::collections::BTreeMap;
+
+use super::traits::{ContentId, ImmutableStore, MutableState, StorageBackend};
+use super::{CacheIndex, FilesystemStorage, State};
+use crate::config::WalrusConfig;
+use crate::sui::SuiClient;
+use crate::walrus::{BlobTracker, WalrusClient};
+
+/// Storage backend using Walrus for immutable objects and Sui for mutable state
+///
+/// Architecture:
+/// - Git objects -> Walrus blobs (with local filesystem cache)
+/// - Git refs -> Sui on-chain (RemoteState.refs table)
+/// - Objects map -> Walrus blob (RemoteState.objects_blob_id points to it)
+/// - Lock -> Sui on-chain (RemoteState.lock)
+pub struct WalrusStorage {
+    /// Configuration
+    config: WalrusConfig,
+
+    /// Sui object ID for RemoteState
+    state_object_id: String,
+
+    /// Local filesystem cache
+    cache: FilesystemStorage,
+
+    /// Walrus client for blob operations
+    walrus_client: WalrusClient,
+
+    /// Sui client for on-chain state (currently stub)
+    sui_client: SuiClient,
+
+    /// Cache index (blob_id ↔ sha256) path
+    cache_index_path: PathBuf,
+
+    /// Blob tracker path
+    blob_tracker_path: PathBuf,
+}
+
+impl WalrusStorage {
+    /// Create a new WalrusStorage instance
+    pub fn new(state_object_id: String) -> Result<Self> {
+        // Load configuration
+        let config = WalrusConfig::load()
+            .context("Failed to load configuration")?;
+
+        // Ensure cache directory exists
+        let cache_dir = config.ensure_cache_dir()?;
+
+        // Create cache storage
+        let cache = FilesystemStorage::new(&cache_dir)
+            .context("Failed to create cache storage")?;
+
+        // Create Walrus client
+        let walrus_client = WalrusClient::new(
+            config.walrus_config_path.clone(),
+            config.default_epochs,
+        );
+
+        // Create Sui client (need to block on async constructor)
+        let sui_client = tokio::runtime::Runtime::new()
+            .context("Failed to create tokio runtime")?
+            .block_on(SuiClient::new(
+                state_object_id.clone(),
+                config.sui_rpc_url.clone(),
+                config.sui_wallet_path.clone(),
+            ))?;
+
+        // Set up paths
+        let cache_index_path = cache_dir.join("cache_index.yaml");
+        let blob_tracker_path = cache_dir.join("blob_tracker.yaml");
+
+        Ok(Self {
+            config,
+            state_object_id,
+            cache,
+            walrus_client,
+            sui_client,
+            cache_index_path,
+            blob_tracker_path,
+        })
+    }
+
+    /// Compute SHA-256 hash of content
+    fn compute_sha256(content: &[u8]) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(content);
+        hex::encode(hasher.finalize())
+    }
+
+    /// Load cache index
+    fn load_cache_index(&self) -> Result<CacheIndex> {
+        CacheIndex::load(&self.cache_index_path)
+            .context("Failed to load cache index")
+    }
+
+    /// Save cache index
+    fn save_cache_index(&self, index: &CacheIndex) -> Result<()> {
+        index.save(&self.cache_index_path)
+            .context("Failed to save cache index")
+    }
+
+    /// Load blob tracker
+    fn load_blob_tracker(&self) -> Result<BlobTracker> {
+        BlobTracker::load(&self.blob_tracker_path)
+            .context("Failed to load blob tracker")
+    }
+
+    /// Save blob tracker
+    fn save_blob_tracker(&self, tracker: &BlobTracker) -> Result<()> {
+        tracker.save(&self.blob_tracker_path)
+            .context("Failed to save blob tracker")
+    }
+
+    /// Check for blob expiration warnings and emit to stderr
+    fn check_blob_expiration(&self) -> Result<()> {
+        let tracker = self.load_blob_tracker()?;
+
+        if tracker.count() == 0 {
+            return Ok(());
+        }
+
+        // Get current Walrus epoch
+        let epoch_info = match self.walrus_client.current_epoch() {
+            Ok(info) => info,
+            Err(e) => {
+                eprintln!("git-remote-walrus: Warning: Failed to get current Walrus epoch: {}", e);
+                return Ok(());
+            }
+        };
+
+        let current_epoch = epoch_info.current_epoch;
+
+        // Check for expiration warnings
+        let (should_warn, min_epoch, expiring_soon) = tracker.check_expiration_warning(
+            current_epoch,
+            self.config.expiration_warning_threshold,
+        );
+
+        if should_warn {
+            eprintln!("git-remote-walrus: ⚠️  WARNING: {} blob(s) expiring soon!", expiring_soon.len());
+            eprintln!("  Current Walrus epoch: {}", current_epoch);
+            eprintln!("  Warning threshold: {} epochs", self.config.expiration_warning_threshold);
+
+            if let Some(min) = min_epoch {
+                eprintln!("  Earliest expiration: epoch {}", min);
+            }
+
+            // List expiring blobs
+            for blob in expiring_soon.iter().take(5) {
+                let epochs_remaining = blob.end_epoch.saturating_sub(current_epoch);
+                eprintln!("    - {} expires in {} epoch(s)",
+                         &blob.blob_id[..16], epochs_remaining);
+            }
+
+            if expiring_soon.len() > 5 {
+                eprintln!("    ... and {} more", expiring_soon.len() - 5);
+            }
+
+            eprintln!("  Action required: Re-upload expiring blobs or repository may become inaccessible");
+        } else {
+            eprintln!("git-remote-walrus: Tracking {} blob(s), earliest expiration at epoch {} (current: {})",
+                     tracker.count(), min_epoch.unwrap_or(0), current_epoch);
+        }
+
+        Ok(())
+    }
+}
+
+impl ImmutableStore for WalrusStorage {
+    fn write_object(&self, content: &[u8]) -> Result<ContentId> {
+        let sha256 = Self::compute_sha256(content);
+
+        // 1. Check if already in cache (by sha256)
+        let mut cache_index = self.load_cache_index()?;
+
+        if let Some(blob_id) = cache_index.get_blob_id(&sha256) {
+            // Already cached, return blob_id
+            eprintln!("git-remote-walrus: Object {} already cached as {}",
+                     &sha256[..8], &blob_id[..16]);
+            return Ok(blob_id.clone());
+        }
+
+        // 2. Upload to Walrus
+        eprintln!("git-remote-walrus: Uploading object {} ({} bytes)",
+                 &sha256[..8], content.len());
+        let blob_id = self.walrus_client.store(content)
+            .context("Failed to store object in Walrus")?;
+
+        // 3. Store in local cache
+        self.cache.write_object(content)
+            .context("Failed to cache object locally")?;
+
+        // 4. Update cache index
+        cache_index.insert(blob_id.clone(), sha256.clone());
+        self.save_cache_index(&cache_index)?;
+
+        // 5. Get blob status and track expiration
+        match self.walrus_client.blob_status(&blob_id) {
+            Ok(status) => {
+                if let Some(end_epoch) = status.end_epoch {
+                    let mut tracker = self.load_blob_tracker()?;
+                    tracker.track_blob(blob_id.clone(), end_epoch, Some(content.len() as u64));
+                    self.save_blob_tracker(&tracker)?;
+                }
+            }
+            Err(e) => {
+                eprintln!("git-remote-walrus: Warning: Failed to get blob status: {}", e);
+            }
+        }
+
+        Ok(blob_id)
+    }
+
+    fn write_objects(&self, contents: &[&[u8]]) -> Result<Vec<ContentId>> {
+        // Simple implementation: write sequentially
+        // TODO: Could optimize with parallel uploads in the future
+        contents.iter()
+            .map(|content| self.write_object(content))
+            .collect()
+    }
+
+    fn read_object(&self, id: &str) -> Result<Vec<u8>> {
+        // 1. Try to read from cache (by sha256)
+        let cache_index = self.load_cache_index()?;
+
+        if let Some(sha256) = cache_index.get_sha256(id) {
+            // Try cache hit
+            match self.cache.read_object(sha256) {
+                Ok(content) => {
+                    eprintln!("git-remote-walrus: Cache hit for {}", &id[..16]);
+                    return Ok(content);
+                }
+                Err(_) => {
+                    // Cache miss, continue to Walrus
+                    eprintln!("git-remote-walrus: Cache miss for {}", &id[..16]);
+                }
+            }
+        }
+
+        // 2. Read from Walrus
+        eprintln!("git-remote-walrus: Downloading from Walrus: {}", &id[..16]);
+        let content = self.walrus_client.read(id)
+            .with_context(|| format!("Failed to read object {} from Walrus", id))?;
+
+        // 3. Cache it locally
+        let sha256 = Self::compute_sha256(&content);
+        let _ = self.cache.write_object(&content); // Ignore errors on cache write
+
+        // 4. Update cache index
+        let mut cache_index = self.load_cache_index()?;
+        cache_index.insert(id.to_string(), sha256);
+        let _ = self.save_cache_index(&cache_index); // Ignore errors on index write
+
+        Ok(content)
+    }
+
+    fn read_objects(&self, ids: &[&str]) -> Result<Vec<Vec<u8>>> {
+        // Simple implementation: read sequentially
+        // TODO: Could optimize with parallel reads in the future
+        ids.iter()
+            .map(|id| self.read_object(id))
+            .collect()
+    }
+
+    fn delete_object(&self, id: &str) -> Result<()> {
+        // Walrus is immutable, so we only delete from cache
+        let cache_index = self.load_cache_index()?;
+
+        if let Some(sha256) = cache_index.get_sha256(id) {
+            self.cache.delete_object(sha256)?;
+        }
+
+        // Note: We don't remove from cache_index or blob_tracker
+        // as the blob still exists on Walrus
+
+        Ok(())
+    }
+
+    fn object_exists(&self, id: &str) -> Result<bool> {
+        // Check cache index
+        let cache_index = self.load_cache_index()?;
+
+        if cache_index.contains_blob(id) {
+            return Ok(true);
+        }
+
+        // Could query Walrus blob-status, but for now assume not exists
+        // If we need it, we can add: self.walrus_client.blob_status(id).is_ok()
+        Ok(false)
+    }
+}
+
+impl MutableState for WalrusStorage {
+    fn read_state(&self) -> Result<State> {
+        // TODO: This is a stub implementation until SuiClient is complete
+        // The real implementation should:
+        // 1. Read refs from Sui on-chain (self.sui_client.read_refs().await?)
+        // 2. Get objects_blob_id from Sui (self.sui_client.get_objects_blob_id().await?)
+        // 3. If objects_blob_id exists, download objects map from Walrus
+        // 4. Construct State with refs and objects
+
+        eprintln!("git-remote-walrus: Reading state from {}", &self.state_object_id[..8]);
+
+        // For now, return empty state
+        // This will be replaced with actual implementation once SuiClient is ready
+        Ok(State::default())
+    }
+
+    fn write_state(&self, state: &State) -> Result<()> {
+        // TODO: This is a stub implementation until SuiClient is complete
+        // The real implementation should:
+        // 1. Serialize objects map to YAML
+        // 2. Upload objects map to Walrus
+        // 3. Acquire lock on RemoteState
+        // 4. Use PTB to:
+        //    - Batch update all refs
+        //    - Update objects_blob_id
+        //    - Release lock
+
+        eprintln!("git-remote-walrus: Writing state to {} ({} refs, {} objects)",
+                 &self.state_object_id[..8],
+                 state.refs.len(),
+                 state.objects.len());
+
+        // Check for blob expiration warnings
+        let _ = self.check_blob_expiration();
+
+        // For now, do nothing
+        // This will be replaced with actual implementation once SuiClient is ready
+        Ok(())
+    }
+
+    fn update_state<F>(&self, update_fn: F) -> Result<()>
+    where
+        F: FnOnce(&mut State) -> Result<()>,
+    {
+        // Standard read-modify-write pattern
+        let mut state = self.read_state()?;
+        update_fn(&mut state)?;
+        self.write_state(&state)?;
+        Ok(())
+    }
+}
+
+impl StorageBackend for WalrusStorage {
+    fn initialize(&self) -> Result<()> {
+        eprintln!("git-remote-walrus: Initializing Walrus storage");
+        eprintln!("  State object: {}", self.state_object_id);
+        eprintln!("  Cache dir: {:?}", self.config.cache_dir);
+        eprintln!("  Sui RPC: {}", self.config.sui_rpc_url);
+
+        // Initialize cache
+        self.cache.initialize()
+            .context("Failed to initialize cache")?;
+
+        // Check blob expiration warnings
+        let _ = self.check_blob_expiration();
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Note: These tests are limited until we have:
+    // 1. Mock Sui client
+    // 2. Mock Walrus client
+    // 3. Localnet setup
+
+    #[test]
+    fn test_compute_sha256() {
+        let content = b"Hello, World!";
+        let hash = WalrusStorage::compute_sha256(content);
+
+        // Known SHA-256 of "Hello, World!"
+        assert_eq!(
+            hash,
+            "dffd6021bb2bd5b0af676290809ec3a53191dd81c7f70a4b28688a362182986f"
+        );
+    }
+}

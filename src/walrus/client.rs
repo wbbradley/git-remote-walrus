@@ -1,9 +1,9 @@
 use anyhow::{Context, Result};
 use serde::Deserialize;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use tempfile::NamedTempFile;
-use std::io::Write;
 
 /// Status of a blob on Walrus
 #[derive(Debug, Clone, Deserialize)]
@@ -12,6 +12,19 @@ pub struct BlobStatus {
     pub blob_id: String,
     pub status: String,
     pub end_epoch: Option<u64>,
+}
+
+/// Walrus epoch information
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EpochInfo {
+    pub current_epoch: u64,
+    #[serde(default)]
+    pub start_of_current_epoch: Option<serde_json::Value>,
+    #[serde(default)]
+    pub epoch_duration: Option<serde_json::Value>,
+    #[serde(default)]
+    pub max_epochs_ahead: Option<u64>,
 }
 
 /// Client for interacting with Walrus CLI
@@ -37,8 +50,8 @@ impl WalrusClient {
     /// Store content on Walrus with specific epoch duration
     pub fn store_with_epochs(&self, content: &[u8], epochs: u32) -> Result<String> {
         // Create a temporary file for the content
-        let mut temp_file = NamedTempFile::new()
-            .context("Failed to create temporary file for Walrus upload")?;
+        let mut temp_file =
+            NamedTempFile::new().context("Failed to create temporary file for Walrus upload")?;
 
         temp_file
             .write_all(content)
@@ -73,7 +86,10 @@ impl WalrusClient {
         let stdout = String::from_utf8_lossy(&output.stdout);
         let blob_id = self.parse_blob_id(&stdout)?;
 
-        eprintln!("walrus: Stored blob {} (expires in {} epochs)", blob_id, epochs);
+        eprintln!(
+            "walrus: Stored blob {} (expires in {} epochs)",
+            blob_id, epochs
+        );
 
         Ok(blob_id)
     }
@@ -123,10 +139,38 @@ impl WalrusClient {
 
         // Parse JSON output
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let status: BlobStatus = serde_json::from_str(&stdout)
-            .context("Failed to parse blob status JSON")?;
+        let status: BlobStatus =
+            serde_json::from_str(&stdout).context("Failed to parse blob status JSON")?;
 
         Ok(status)
+    }
+
+    /// Get current Walrus epoch information
+    pub fn current_epoch(&self) -> Result<EpochInfo> {
+        // Build walrus info epoch command
+        let mut cmd = Command::new("walrus");
+        cmd.arg("info").arg("epoch").arg("--json");
+
+        if let Some(config) = &self.config_path {
+            cmd.arg("--config").arg(config);
+        }
+
+        // Execute command
+        let output = cmd
+            .output()
+            .context("Failed to execute walrus info epoch command")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("walrus info epoch failed: {}", stderr);
+        }
+
+        // Parse JSON output
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let epoch_info: EpochInfo =
+            serde_json::from_str(&stdout).context("Failed to parse epoch info JSON")?;
+
+        Ok(epoch_info)
     }
 
     /// Parse blob_id from walrus store output
@@ -159,20 +203,6 @@ impl WalrusClient {
             }
         }
 
-        // Fallback: search for blob_id pattern in output
-        // Walrus blob IDs typically look like base64 encoded strings or hex
-        for line in output.lines() {
-            if line.contains("blob") && line.contains("id") {
-                // This is a simple heuristic - may need adjustment based on actual output
-                if let Some(id) = line.split(':').nth(1) {
-                    let id = id.trim().trim_matches('"').trim_matches(',');
-                    if !id.is_empty() {
-                        return Ok(id.to_string());
-                    }
-                }
-            }
-        }
-
         anyhow::bail!("Failed to parse blob_id from walrus output: {}", output)
     }
 }
@@ -190,7 +220,8 @@ mod tests {
     #[test]
     fn test_parse_blob_id_newly_created() {
         let client = WalrusClient::default();
-        let output = r#"{"newlyCreated": {"blobObject": {"id": "0x123", "blobId": "test-blob-id-123"}}}"#;
+        let output =
+            r#"{"newlyCreated": {"blobObject": {"id": "0x123", "blobId": "test-blob-id-123"}}}"#;
         let blob_id = client.parse_blob_id(output).unwrap();
         assert_eq!(blob_id, "test-blob-id-123");
     }

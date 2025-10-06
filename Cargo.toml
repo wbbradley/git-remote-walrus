@@ -18,6 +18,11 @@ sha1 = "0.10.6"
 gix-object = "0.50.2"
 tempfile = "3.23.0"
 serde_json = "1.0.145"
+dirs = "6.0.0"
+# Sui SDK
+sui-sdk = { git = "https://github.com/MystenLabs/sui", package = "sui-sdk" }
+sui-types = { git = "https://github.com/MystenLabs/sui", package = "sui-types" }
+tokio = { version = "1", features = ["rt", "macros", "rt-multi-thread"] }
 
 [dev-dependencies]
 tempfile = "3.23.0"
