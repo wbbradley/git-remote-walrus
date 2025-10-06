@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::path::PathBuf;
+use sui_config::{sui_config_dir, SUI_KEYSTORE_FILENAME};
 
 /// Configuration for git-remote-walrus
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -131,7 +132,10 @@ impl Default for WalrusConfig {
 
         Self {
             sui_rpc_url: "https://fullnode.testnet.sui.io:443".to_string(),
-            sui_wallet_path: home.join(".sui/sui_config/client.yaml"),
+            sui_wallet_path: sui_config_dir()
+                .context("Failed to get Sui config directory")
+                .expect("Sui config directory is required")
+                .join(SUI_KEYSTORE_FILENAME),
             walrus_config_path: None,
             cache_dir: home.join(".cache/git-remote-walrus"),
             default_epochs: 5,

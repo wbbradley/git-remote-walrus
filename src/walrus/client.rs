@@ -65,6 +65,7 @@ impl WalrusClient {
         // Build walrus store command
         let mut cmd = Command::new("walrus");
         cmd.arg("store")
+            .arg("--json")
             .arg("--epochs")
             .arg(epochs.to_string())
             .arg(temp_file.path());
@@ -121,8 +122,12 @@ impl WalrusClient {
     /// Get blob status from Walrus
     pub fn blob_status(&self, blob_id: &str) -> Result<BlobStatus> {
         // Build walrus blob-status command
+        // Use --blob-id flag to avoid blob IDs starting with '-' being interpreted as flags
         let mut cmd = Command::new("walrus");
-        cmd.arg("blob-status").arg(blob_id);
+        cmd.arg("blob-status")
+            .arg("--json")
+            .arg("--blob-id")
+            .arg(blob_id);
 
         if let Some(config) = &self.config_path {
             cmd.arg("--config").arg(config);
@@ -177,11 +182,39 @@ impl WalrusClient {
     /// Parse blob_id from walrus store output
     fn parse_blob_id(&self, output: &str) -> Result<String> {
         // The walrus store command outputs JSON with the blob_id
-        // Example: {"newlyCreated": {"blobObject": {"id": "0x...", "blobId": "..."}}}
+        // Format: [{"blobStoreResult": {...}, "path": "..."}]
+        // blobStoreResult contains either:
+        //   - alreadyCertified: Blob already exists (deduplicated)
+        //   - newlyCreated: Blob was just uploaded
 
         // Try to parse as JSON first
         if let Ok(json) = serde_json::from_str::<serde_json::Value>(output) {
-            // Try different JSON structures
+            // Array format with blobStoreResult wrapper
+            if let Some(array) = json.as_array() {
+                if let Some(first) = array.first() {
+                    if let Some(result) = first.get("blobStoreResult") {
+                        // Try alreadyCertified (blob was deduplicated)
+                        if let Some(blob_id) = result
+                            .get("alreadyCertified")
+                            .and_then(|ac| ac.get("blobId"))
+                            .and_then(|id| id.as_str())
+                        {
+                            return Ok(blob_id.to_string());
+                        }
+                        // Try newlyCreated (blob was uploaded)
+                        if let Some(blob_id) = result
+                            .get("newlyCreated")
+                            .and_then(|nc| nc.get("blobObject"))
+                            .and_then(|bo| bo.get("blobId"))
+                            .and_then(|id| id.as_str())
+                        {
+                            return Ok(blob_id.to_string());
+                        }
+                    }
+                }
+            }
+
+            // Fallback: try direct object access (for compatibility)
             if let Some(blob_id) = json
                 .get("newlyCreated")
                 .and_then(|nc| nc.get("blobObject"))
@@ -241,5 +274,21 @@ mod tests {
         let output = r#"{"blob_id": "simple-blob-id"}"#;
         let blob_id = client.parse_blob_id(output).unwrap();
         assert_eq!(blob_id, "simple-blob-id");
+    }
+
+    #[test]
+    fn test_parse_blob_id_new_format_already_certified() {
+        let client = WalrusClient::default();
+        let output = r#"[{"blobStoreResult": {"alreadyCertified": {"blobId": "new-format-blob-id", "object": "0x123", "endEpoch": 191}}, "path": "/tmp/file"}]"#;
+        let blob_id = client.parse_blob_id(output).unwrap();
+        assert_eq!(blob_id, "new-format-blob-id");
+    }
+
+    #[test]
+    fn test_parse_blob_id_new_format_newly_created() {
+        let client = WalrusClient::default();
+        let output = r#"[{"blobStoreResult": {"newlyCreated": {"blobObject": {"blobId": "newly-created-id"}}}, "path": "/tmp/file"}]"#;
+        let blob_id = client.parse_blob_id(output).unwrap();
+        assert_eq!(blob_id, "newly-created-id");
     }
 }

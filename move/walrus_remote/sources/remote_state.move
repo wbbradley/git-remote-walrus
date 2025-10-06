@@ -1,4 +1,5 @@
 module walrus_remote::remote_state {
+    use std::string::String;
     use sui::table::{Self, Table};
     use sui::clock::{Self, Clock};
     use sui::vec_set::{Self, VecSet};
@@ -33,7 +34,7 @@ module walrus_remote::remote_state {
     }
 
     /// Create a new RemoteState (owned by caller)
-    public entry fun create_remote(ctx: &mut TxContext) {
+    public fun create_remote(ctx: &mut TxContext) {
         let owner = ctx.sender();
         let remote = RemoteState {
             id: object::new(ctx),
@@ -48,7 +49,8 @@ module walrus_remote::remote_state {
     }
 
     /// Convert owned RemoteState to shared with allowlist
-    public entry fun share_with_allowlist(
+    #[lint_allow(share_owned)]
+    public fun share_with_allowlist(
         mut state: RemoteState,
         initial_allowlist: vector<address>,
         ctx: &TxContext
@@ -71,7 +73,7 @@ module walrus_remote::remote_state {
     }
 
     /// Acquire lock with timeout (typically 5 minutes = 300000ms)
-    public entry fun acquire_lock(
+    public fun acquire_lock(
         state: &mut RemoteState,
         clock: &Clock,
         timeout_ms: u64,
@@ -101,7 +103,7 @@ module walrus_remote::remote_state {
     }
 
     /// Release lock (caller must be lock holder)
-    public entry fun release_lock(
+    public fun release_lock(
         state: &mut RemoteState,
         ctx: &TxContext
     ) {
@@ -114,7 +116,7 @@ module walrus_remote::remote_state {
     }
 
     /// Upsert a single ref (insert or update)
-    public entry fun upsert_ref(
+    public fun upsert_ref(
         state: &mut RemoteState,
         ref_name: String,
         git_sha1: String,
@@ -131,7 +133,7 @@ module walrus_remote::remote_state {
     }
 
     /// Delete a ref
-    public entry fun delete_ref(
+    public fun delete_ref(
         state: &mut RemoteState,
         ref_name: String,
         ctx: &TxContext
@@ -144,7 +146,7 @@ module walrus_remote::remote_state {
     }
 
     /// Update objects blob ID (requires lock)
-    public entry fun update_objects_blob(
+    public fun update_objects_blob(
         state: &mut RemoteState,
         blob_id: String,
         clock: &Clock,
@@ -155,7 +157,7 @@ module walrus_remote::remote_state {
     }
 
     /// Add address to allowlist (owner only)
-    public entry fun add_to_allowlist(
+    public fun add_to_allowlist(
         state: &mut RemoteState,
         address_to_add: address,
         ctx: &TxContext
@@ -173,7 +175,7 @@ module walrus_remote::remote_state {
     }
 
     /// Remove address from allowlist (owner only)
-    public entry fun remove_from_allowlist(
+    public fun remove_from_allowlist(
         state: &mut RemoteState,
         address_to_remove: address,
         ctx: &TxContext

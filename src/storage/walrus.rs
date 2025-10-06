@@ -191,7 +191,7 @@ impl ImmutableStore for WalrusStorage {
         if let Some(blob_id) = cache_index.get_blob_id(&sha256) {
             // Already cached, return blob_id
             eprintln!(
-                "git-remote-walrus: Object {} already cached as {}",
+                "git-remote-walrus: Object '{}...' already cached as '{}...'",
                 &sha256[..8],
                 &blob_id[..16]
             );
@@ -200,7 +200,7 @@ impl ImmutableStore for WalrusStorage {
 
         // 2. Upload to Walrus
         eprintln!(
-            "git-remote-walrus: Uploading object {} ({} bytes)",
+            "git-remote-walrus: Uploading object '{}...' ({} bytes)",
             &sha256[..8],
             content.len()
         );
@@ -392,6 +392,7 @@ impl MutableState for WalrusStorage {
         // Acquire lock on RemoteState (5 minute timeout)
         eprintln!("  Acquiring lock on RemoteState...");
         self.runtime
+            // TODO: move timeout to config
             .block_on(self.sui_client.acquire_lock(300_000))
             .context("Failed to acquire lock on RemoteState")?;
 

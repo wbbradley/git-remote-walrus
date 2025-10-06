@@ -3,13 +3,14 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use shared_crypto::intent::{Intent, IntentMessage};
-use sui_config::{sui_config_dir, SUI_KEYSTORE_FILENAME};
+use sui_config::{sui_config_dir, PersistedConfig, SUI_CLIENT_CONFIG, SUI_KEYSTORE_FILENAME};
 use sui_keys::keystore::{AccountKeystore, FileBasedKeystore};
 use sui_sdk::{
     rpc_types::{
         SuiMoveStruct, SuiMoveValue, SuiObjectDataOptions, SuiParsedData,
         SuiTransactionBlockEffectsAPI, SuiTransactionBlockResponseOptions,
     },
+    sui_client_config::SuiClientConfig,
     SuiClientBuilder,
 };
 use sui_types::{
@@ -49,8 +50,7 @@ pub struct SuiClient {
 impl SuiClient {
     /// Create a new Sui client
     ///
-    /// Loads the keystore from the wallet_path (or default location) and derives
-    /// the sender address from the first key in the keystore.
+    /// Loads the keystore and active address from Sui client config.
     pub async fn new(
         state_object_id: String,
         rpc_url: String,
@@ -66,23 +66,38 @@ impl SuiClient {
             .await
             .context("Failed to build Sui client")?;
 
-        // Load keystore from wallet path or default location
-        let keystore_path = if wallet_path.exists() && wallet_path.is_file() {
+        // Load Sui client config to get active address
+        let config_dir = if wallet_path.exists() && wallet_path.is_file() {
             wallet_path
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new("."))
+                .to_path_buf()
         } else {
-            sui_config_dir()
-                .context("Failed to get Sui config directory")?
-                .join(SUI_KEYSTORE_FILENAME)
+            sui_config_dir().context("Failed to get Sui config directory")?
         };
 
+        let config_path = config_dir.join(SUI_CLIENT_CONFIG);
+        let sui_config: SuiClientConfig = PersistedConfig::read(&config_path)
+            .with_context(|| format!("Failed to load Sui config from {:?}", config_path))?;
+
+        // Get active address from config
+        let sender = sui_config
+            .active_address
+            .ok_or_else(|| anyhow::anyhow!("No active address found in Sui config"))?;
+
+        // Load keystore
+        let keystore_path = config_dir.join(SUI_KEYSTORE_FILENAME);
         let keystore = FileBasedKeystore::load_or_create(&keystore_path)
             .with_context(|| format!("Failed to load keystore from {:?}", keystore_path))?;
 
-        // Get the first address from the keystore as sender
-        let addresses = keystore.addresses();
-        let sender = *addresses
-            .first()
-            .ok_or_else(|| anyhow::anyhow!("No addresses found in keystore"))?;
+        // Verify the active address exists in the keystore
+        if !keystore.addresses().contains(&sender) {
+            anyhow::bail!(
+                "Active address {} not found in keystore at {:?}",
+                sender,
+                keystore_path
+            );
+        }
 
         // TODO: Load package ID from the RemoteState object
         // For now, we'll extract it when we read the object
@@ -616,9 +631,10 @@ impl SuiClient {
 
         // 4. Sign transaction with keystore
         let intent_msg = IntentMessage::new(Intent::sui_transaction(), tx_data.clone());
+        let digest = intent_msg.value.digest();
         let signature: Signature = self
             .keystore
-            .sign_secure(&self.sender, &intent_msg, Intent::sui_transaction())
+            .sign_hashed(&self.sender, digest.as_ref())
             .await
             .context("Failed to sign transaction")?;
 
