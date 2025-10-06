@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use super::traits::{ContentId, ImmutableStore, MutableState, StorageBackend};
 use super::{CacheIndex, FilesystemStorage, State};
-use crate::config::WalrusConfig;
+use crate::config::WalrusRemoteConfig;
 use crate::sui::SuiClient;
 use crate::walrus::{BlobTracker, WalrusClient};
 
@@ -18,7 +18,7 @@ use crate::walrus::{BlobTracker, WalrusClient};
 /// - Lock -> Sui on-chain (RemoteState.lock)
 pub struct WalrusStorage {
     /// Configuration
-    config: WalrusConfig,
+    config: WalrusRemoteConfig,
 
     /// Sui object ID for RemoteState
     state_object_id: String,
@@ -46,7 +46,7 @@ impl WalrusStorage {
     /// Create a new WalrusStorage instance
     pub fn new(state_object_id: String) -> Result<Self> {
         // Load configuration
-        let config = WalrusConfig::load().context("Failed to load configuration")?;
+        let config = WalrusRemoteConfig::load().context("Failed to load configuration")?;
 
         // Ensure cache directory exists
         let cache_dir = config.ensure_cache_dir()?;
@@ -322,7 +322,7 @@ impl MutableState for WalrusStorage {
     fn read_state(&self) -> Result<State> {
         eprintln!(
             "git-remote-walrus: Reading state from {}",
-            &self.state_object_id[..8]
+            &self.state_object_id
         );
 
         // Read refs from Sui on-chain
@@ -363,7 +363,7 @@ impl MutableState for WalrusStorage {
     fn write_state(&self, state: &State) -> Result<()> {
         eprintln!(
             "git-remote-walrus: Writing state to {} ({} refs, {} objects)",
-            &self.state_object_id[..8],
+            self.state_object_id,
             state.refs.len(),
             state.objects.len()
         );
@@ -371,13 +371,19 @@ impl MutableState for WalrusStorage {
         // Check for blob expiration warnings
         let _ = self.check_blob_expiration();
 
-        // Serialize objects map to YAML
+        // Step 1: Acquire lock on RemoteState (5 minute timeout)
+        // This ensures no one else can modify the state while we upload to Walrus
+        eprintln!("  Acquiring lock on RemoteState...");
+        self.runtime
+            .block_on(self.sui_client.acquire_lock(300_000))
+            .context("Failed to acquire lock on RemoteState")?;
+
+        // Step 2: Serialize and upload objects map to Walrus (while holding lock)
         eprintln!("  Serializing objects map...");
         let objects_yaml_str = serde_yaml::to_string(&state.objects)
             .context("Failed to serialize objects map to YAML")?;
         let objects_yaml = objects_yaml_str.as_bytes();
 
-        // Upload objects map to Walrus
         eprintln!(
             "  Uploading objects map to Walrus ({} bytes)...",
             objects_yaml.len()
@@ -389,23 +395,16 @@ impl MutableState for WalrusStorage {
 
         eprintln!("  Objects blob ID: {}", &objects_blob_id[..16]);
 
-        // Acquire lock on RemoteState (5 minute timeout)
-        eprintln!("  Acquiring lock on RemoteState...");
-        self.runtime
-            // TODO: move timeout to config
-            .block_on(self.sui_client.acquire_lock(300_000))
-            .context("Failed to acquire lock on RemoteState")?;
-
-        // Convert refs to Vec for PTB
+        // Step 3: Convert refs to Vec for PTB
         let refs: Vec<(String, String)> = state
             .refs
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
 
-        // Execute atomic PTB: update refs + update objects_blob_id + release lock
+        // Step 4: Execute atomic PTB: update refs + update objects_blob_id + release lock
         eprintln!(
-            "  Executing atomic PTB (updating {} refs + objects blob)...",
+            "  Executing atomic PTB (update {} refs + objects blob + release lock)...",
             refs.len()
         );
         self.runtime

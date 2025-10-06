@@ -6,15 +6,14 @@ use sui_config::{sui_config_dir, SUI_KEYSTORE_FILENAME};
 
 /// Configuration for git-remote-walrus
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WalrusConfig {
+pub struct WalrusRemoteConfig {
     /// Sui RPC URL (e.g., https://fullnode.testnet.sui.io:443)
     pub sui_rpc_url: String,
 
     /// Path to Sui wallet configuration
     pub sui_wallet_path: PathBuf,
 
-    /// Optional path to Walrus CLI config
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Path to Walrus CLI config
     pub walrus_config_path: Option<PathBuf>,
 
     /// Cache directory for local storage
@@ -39,19 +38,16 @@ mod defaults {
     }
 }
 
-impl WalrusConfig {
+impl WalrusRemoteConfig {
     /// Load configuration from environment variables and config file
     pub fn load() -> Result<Self> {
-        // Start with defaults
-        let mut config = Self::default();
-
         // Try to load from config file
-        if let Some(config_path) = Self::config_file_path() {
-            if config_path.exists() {
-                let file_config = Self::load_from_file(&config_path)?;
-                config = file_config;
-            }
-        }
+        let config_path = Self::config_file_path()?;
+        let mut config = if config_path.exists() {
+            Self::load_from_file(&config_path)?
+        } else {
+            anyhow::bail!("Config file not found at {:?}", config_path);
+        };
 
         // Override with environment variables if present
         if let Ok(url) = env::var("SUI_RPC_URL") {
@@ -82,6 +78,7 @@ impl WalrusConfig {
                 .context("Failed to parse WALRUS_EXPIRATION_WARNING_THRESHOLD as u64")?;
         }
 
+        eprintln!("Using Walrus config: {:?}", config);
         Ok(config)
     }
 
@@ -90,7 +87,7 @@ impl WalrusConfig {
         let content = std::fs::read_to_string(path)
             .with_context(|| format!("Failed to read config file: {:?}", path))?;
 
-        let config: WalrusConfig = serde_yaml::from_str(&content)
+        let config: WalrusRemoteConfig = serde_yaml::from_str(&content)
             .with_context(|| format!("Failed to parse config file: {:?}", path))?;
 
         Ok(config)
@@ -114,8 +111,10 @@ impl WalrusConfig {
     }
 
     /// Get default config file path
-    pub fn config_file_path() -> Option<PathBuf> {
-        dirs::home_dir().map(|home| home.join(".config/git-remote-walrus/config.yaml"))
+    pub fn config_file_path() -> Result<PathBuf> {
+        dirs::home_dir()
+            .map(|home| home.join(".config/git-remote-walrus/config.yaml"))
+            .context("Could not determine home directory for config file")
     }
 
     /// Get cache directory, creating it if necessary
@@ -126,6 +125,7 @@ impl WalrusConfig {
     }
 }
 
+/*
 impl Default for WalrusConfig {
     fn default() -> Self {
         let home = dirs::home_dir().expect("Could not determine home directory");
@@ -143,6 +143,7 @@ impl Default for WalrusConfig {
         }
     }
 }
+*/
 
 #[cfg(test)]
 mod tests {
@@ -151,7 +152,7 @@ mod tests {
 
     #[test]
     fn test_default_config() {
-        let config = WalrusConfig::default();
+        let config = WalrusRemoteConfig::default();
         assert_eq!(config.sui_rpc_url, "https://fullnode.testnet.sui.io:443");
         assert_eq!(config.default_epochs, 5);
         assert_eq!(config.expiration_warning_threshold, 10);
@@ -162,10 +163,17 @@ mod tests {
         let dir = tempdir().unwrap();
         let config_path = dir.path().join("config.yaml");
 
-        let config = WalrusConfig::default();
+        let config = WalrusRemoteConfig {
+            sui_rpc_url: "https://example.com".to_string(),
+            sui_wallet_path: PathBuf::from("/path/to/wallet"),
+            walrus_config_path: Some(PathBuf::from("/path/to/walrus/config")),
+            cache_dir: dir.path().join("cache"),
+            default_epochs: 7,
+            expiration_warning_threshold: 15,
+        };
         config.save(&config_path).unwrap();
 
-        let loaded = WalrusConfig::load_from_file(&config_path).unwrap();
+        let loaded = WalrusRemoteConfig::load_from_file(&config_path).unwrap();
         assert_eq!(loaded.sui_rpc_url, config.sui_rpc_url);
         assert_eq!(loaded.default_epochs, config.default_epochs);
     }
@@ -175,7 +183,7 @@ mod tests {
         env::set_var("SUI_RPC_URL", "https://custom.rpc.url");
         env::set_var("WALRUS_BLOB_EPOCHS", "10");
 
-        let config = WalrusConfig::load().unwrap();
+        let config = WalrusRemoteConfig::load().unwrap();
         assert_eq!(config.sui_rpc_url, "https://custom.rpc.url");
         assert_eq!(config.default_epochs, 10);
 

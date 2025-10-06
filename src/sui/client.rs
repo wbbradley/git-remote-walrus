@@ -2,9 +2,9 @@ use anyhow::{Context, Result};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use shared_crypto::intent::{Intent, IntentMessage};
+use shared_crypto::intent::Intent;
 use sui_config::{sui_config_dir, PersistedConfig, SUI_CLIENT_CONFIG, SUI_KEYSTORE_FILENAME};
-use sui_keys::keystore::{AccountKeystore, FileBasedKeystore};
+use sui_keys::keystore::{AccountKeystore, FileBasedKeystore, Keystore};
 use sui_sdk::{
     rpc_types::{
         SuiMoveStruct, SuiMoveValue, SuiObjectDataOptions, SuiParsedData,
@@ -43,8 +43,8 @@ pub struct SuiClient {
     /// Sender address (from wallet)
     sender: SuiAddress,
 
-    /// File-based keystore for signing transactions
-    keystore: FileBasedKeystore,
+    /// Keystore for signing transactions
+    sui_client_config: SuiClientConfig,
 }
 
 impl SuiClient {
@@ -67,49 +67,65 @@ impl SuiClient {
             .context("Failed to build Sui client")?;
 
         // Load Sui client config to get active address
-        let config_dir = if wallet_path.exists() && wallet_path.is_file() {
-            wallet_path
-                .parent()
-                .unwrap_or_else(|| std::path::Path::new("."))
-                .to_path_buf()
-        } else {
-            sui_config_dir().context("Failed to get Sui config directory")?
-        };
-
-        let config_path = config_dir.join(SUI_CLIENT_CONFIG);
-        let sui_config: SuiClientConfig = PersistedConfig::read(&config_path)
-            .with_context(|| format!("Failed to load Sui config from {:?}", config_path))?;
+        let sui_client_config: SuiClientConfig = PersistedConfig::read(&wallet_path)
+            .with_context(|| format!("Failed to load Sui config from {:?}", wallet_path))?;
 
         // Get active address from config
-        let sender = sui_config
+        let active_address = sui_client_config
             .active_address
             .ok_or_else(|| anyhow::anyhow!("No active address found in Sui config"))?;
 
-        // Load keystore
-        let keystore_path = config_dir.join(SUI_KEYSTORE_FILENAME);
-        let keystore = FileBasedKeystore::load_or_create(&keystore_path)
-            .with_context(|| format!("Failed to load keystore from {:?}", keystore_path))?;
-
         // Verify the active address exists in the keystore
-        if !keystore.addresses().contains(&sender) {
-            anyhow::bail!(
-                "Active address {} not found in keystore at {:?}",
-                sender,
-                keystore_path
-            );
+        if !sui_client_config
+            .keystore
+            .addresses()
+            .contains(&active_address)
+        {
+            anyhow::bail!("Active address {} not found in keystore", active_address,);
         }
 
-        // TODO: Load package ID from the RemoteState object
-        // For now, we'll extract it when we read the object
-        let package_id = ObjectID::ZERO; // Placeholder
+        // Extract package ID from RemoteState object
+        let package_id = Self::extract_package_id(&client, state_object_id)
+            .await
+            .context("Failed to extract package ID from RemoteState object")?;
 
         Ok(Self {
             client,
             state_object_id,
             package_id,
-            sender,
-            keystore,
+            sender: active_address,
+            sui_client_config,
         })
+    }
+
+    /// Extract package ID from RemoteState object type
+    async fn extract_package_id(
+        client: &sui_sdk::SuiClient,
+        state_object_id: ObjectID,
+    ) -> Result<ObjectID> {
+        let object = client
+            .read_api()
+            .get_object_with_options(state_object_id, SuiObjectDataOptions::new().with_type())
+            .await
+            .context("Failed to fetch RemoteState object")?;
+
+        let data = object
+            .data
+            .ok_or_else(|| anyhow::anyhow!("RemoteState object not found"))?;
+
+        let type_str = data
+            .type_
+            .ok_or_else(|| anyhow::anyhow!("RemoteState object has no type"))?
+            .to_string();
+
+        // Type format: "0xPACKAGE_ID::remote_state::RemoteState"
+        let package_hex = type_str
+            .split("::")
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("Invalid RemoteState type format: {}", type_str))?;
+
+        ObjectID::from_hex_literal(package_hex)
+            .with_context(|| format!("Failed to parse package ID from type: {}", type_str))
     }
 
     /// Get the object reference for the RemoteState
@@ -416,36 +432,96 @@ impl SuiClient {
     }
 
     /// Acquire lock with timeout
+    /// Retries on 504 timeout errors since transaction may have succeeded
     pub async fn acquire_lock(&self, timeout_ms: u64) -> Result<()> {
-        let mut ptb = ProgrammableTransactionBuilder::new();
+        const MAX_RETRIES: u32 = 3;
+        const RETRY_DELAY_MS: u64 = 2000;
 
-        // Get object references
-        let state_ref = self.get_state_object_ref().await?;
-        let clock_ref = self.get_clock_object_ref().await?;
+        for attempt in 0..MAX_RETRIES {
+            if attempt > 0 {
+                eprintln!("  Retry attempt {} after 504 timeout...", attempt);
+                tokio::time::sleep(tokio::time::Duration::from_millis(RETRY_DELAY_MS)).await;
 
-        // Add objects as inputs
-        let state_arg = ptb.obj(ObjectArg::ImmOrOwnedObject(state_ref))?;
-        let clock_arg = ptb.obj(ObjectArg::SharedObject {
-            id: clock_ref.0,
-            initial_shared_version: clock_ref.1,
-            mutable: false,
-        })?;
+                // Check if lock was actually acquired despite the timeout
+                if self.check_lock_acquired().await? {
+                    eprintln!("  Lock was already acquired in previous attempt");
+                    return Ok(());
+                }
+            }
 
-        // Call acquire_lock
-        let timeout_arg = ptb.pure(timeout_ms)?;
+            let mut ptb = ProgrammableTransactionBuilder::new();
 
-        ptb.programmable_move_call(
-            self.package_id,
-            Identifier::new("remote_state")?,
-            Identifier::new("acquire_lock")?,
-            vec![], // no type arguments
-            vec![state_arg, clock_arg, timeout_arg],
-        );
+            // Get object references
+            let state_ref = self.get_state_object_ref().await?;
+            let clock_ref = self.get_clock_object_ref().await?;
 
-        // Build and execute transaction
-        self.execute_ptb(ptb, DEFAULT_GAS_BUDGET).await?;
+            // Add objects as inputs
+            let state_arg = ptb.obj(ObjectArg::ImmOrOwnedObject(state_ref))?;
+            let clock_arg = ptb.obj(ObjectArg::SharedObject {
+                id: clock_ref.0,
+                initial_shared_version: clock_ref.1,
+                mutable: false,
+            })?;
 
-        Ok(())
+            // Call acquire_lock
+            let timeout_arg = ptb.pure(timeout_ms)?;
+
+            ptb.programmable_move_call(
+                self.package_id,
+                Identifier::new("remote_state")?,
+                Identifier::new("acquire_lock")?,
+                vec![], // no type arguments
+                vec![state_arg, clock_arg, timeout_arg],
+            );
+
+            // Build and execute transaction
+            match self.execute_ptb(ptb, DEFAULT_GAS_BUDGET).await {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    eprintln!("git-remote-walrus: [acquire_lock(timeout_ms={timeout_ms})] execute_ptb error: {e:?}");
+                    let err_str = e.to_string();
+                    // Retry only on 504 timeouts
+                    if err_str.contains("504") && attempt < MAX_RETRIES - 1 {
+                        eprintln!(
+                            "  Got 504 timeout on attempt {}, will retry...",
+                            attempt + 1
+                        );
+                        continue;
+                    }
+                    return Err(e);
+                }
+            }
+        }
+
+        anyhow::bail!("Failed to acquire lock after {} retries", MAX_RETRIES)
+    }
+
+    /// Check if a lock is currently held on the RemoteState
+    async fn check_lock_acquired(&self) -> Result<bool> {
+        let object = self
+            .client
+            .read_api()
+            .get_object_with_options(
+                self.state_object_id,
+                SuiObjectDataOptions::new().with_content(),
+            )
+            .await
+            .context("Failed to fetch RemoteState object")?;
+
+        let data = object
+            .data
+            .ok_or_else(|| anyhow::anyhow!("RemoteState object not found"))?;
+
+        if let Some(SuiParsedData::MoveObject(move_obj)) = data.content {
+            if let SuiMoveStruct::WithFields(fields) = move_obj.fields {
+                if let Some(lock_value) = fields.get("lock") {
+                    // If lock field is Some (not null), lock is acquired
+                    return Ok(matches!(lock_value, SuiMoveValue::Option(opt) if opt.is_some()));
+                }
+            }
+        }
+
+        Ok(false)
     }
 
     /// Update objects blob ID (requires lock)
@@ -630,24 +706,26 @@ impl SuiClient {
         );
 
         // 4. Sign transaction with keystore
-        let intent_msg = IntentMessage::new(Intent::sui_transaction(), tx_data.clone());
-        let digest = intent_msg.value.digest();
+        eprintln!("  Signing transaction with address: {}", self.sender);
         let signature: Signature = self
+            .sui_client_config
             .keystore
-            .sign_hashed(&self.sender, digest.as_ref())
+            .sign_secure(&self.sender, &tx_data, Intent::sui_transaction())
             .await
             .context("Failed to sign transaction")?;
+        eprintln!("  Transaction signed successfully");
 
         // 5. Create signed transaction
         let transaction = Transaction::from_data(tx_data, vec![signature]);
 
         // 6. Execute transaction
+        // Use WaitForEffectsCert for faster response (doesn't wait for local execution)
         let response = self
             .client
             .quorum_driver_api()
             .execute_transaction_block(
                 transaction,
-                SuiTransactionBlockResponseOptions::default(),
+                SuiTransactionBlockResponseOptions::default().with_effects(),
                 Some(ExecuteTransactionRequestType::WaitForLocalExecution),
             )
             .await
