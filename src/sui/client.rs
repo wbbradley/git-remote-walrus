@@ -15,6 +15,7 @@ use sui_sdk::{
 use sui_types::{
     base_types::{ObjectID, ObjectRef, SuiAddress},
     crypto::Signature,
+    dynamic_field::DynamicFieldName,
     programmable_transaction_builder::ProgrammableTransactionBuilder,
     quorum_driver_types::ExecuteTransactionRequestType,
     transaction::{Argument, Command, ObjectArg, Transaction, TransactionData},
@@ -136,22 +137,125 @@ impl SuiClient {
 
     /// Read all refs from on-chain state
     pub async fn read_refs(&self) -> Result<BTreeMap<String, String>> {
-        // TODO: Implement dynamic field reading for Table<String, String>
-        // This requires querying the dynamic fields of the RemoteState object
-        // and deserializing the key-value pairs
+        // Get the RemoteState object
+        let remote_state = self
+            .client
+            .read_api()
+            .get_object_with_options(
+                self.state_object_id,
+                SuiObjectDataOptions::new()
+                    .with_content()
+                    .with_bcs(),
+            )
+            .await
+            .context("Failed to fetch RemoteState object")?;
 
-        // For now, return empty map
-        anyhow::bail!("read_refs not yet fully implemented - needs Table dynamic field reading");
+        let data = remote_state
+            .data
+            .ok_or_else(|| anyhow::anyhow!("RemoteState object not found"))?;
+
+        // Extract the refs Table UID from the object content
+        // The Table is stored as a dynamic field container
+        let content = data
+            .content
+            .ok_or_else(|| anyhow::anyhow!("RemoteState has no content"))?;
+
+        // Get the refs Table's ObjectID from the struct
+        let table_id = self.extract_table_id_from_content(&content)
+            .context("Failed to extract refs table ID")?;
+
+        // Query all dynamic fields of the Table
+        let mut refs = BTreeMap::new();
+        let mut cursor = None;
+
+        loop {
+            let page = self
+                .client
+                .read_api()
+                .get_dynamic_fields(table_id, cursor, Some(100))
+                .await
+                .context("Failed to get dynamic fields")?;
+
+            for field in page.data {
+                // Extract ref name from field.name
+                let ref_name = self.extract_string_from_dynamic_field_name(&field.name)?;
+
+                // Get the field value (git SHA1)
+                let field_value = self
+                    .client
+                    .read_api()
+                    .get_dynamic_field_object(table_id, field.name.clone())
+                    .await
+                    .context("Failed to get dynamic field value")?;
+
+                if let Some(data) = field_value.data {
+                    if let Some(content) = data.content {
+                        let git_sha1 = self.extract_string_value_from_content(&content)?;
+                        refs.insert(ref_name, git_sha1);
+                    }
+                }
+            }
+
+            if page.has_next_page {
+                cursor = page.next_cursor;
+            } else {
+                break;
+            }
+        }
+
+        Ok(refs)
     }
 
     /// Get objects blob ID from on-chain state
     pub async fn get_objects_blob_id(&self) -> Result<Option<String>> {
-        // TODO: Implement by reading the RemoteState object's fields
-        // Need to deserialize the Move struct to access objects_blob_id field
+        // Get the RemoteState object with content
+        let remote_state = self
+            .client
+            .read_api()
+            .get_object_with_options(
+                self.state_object_id,
+                SuiObjectDataOptions::new()
+                    .with_content()
+                    .with_bcs(),
+            )
+            .await
+            .context("Failed to fetch RemoteState object")?;
 
-        anyhow::bail!(
-            "get_objects_blob_id not yet fully implemented - needs object deserialization"
-        );
+        let data = remote_state
+            .data
+            .ok_or_else(|| anyhow::anyhow!("RemoteState object not found"))?;
+
+        let content = data
+            .content
+            .ok_or_else(|| anyhow::anyhow!("RemoteState has no content"))?;
+
+        // Extract objects_blob_id from the struct
+        self.extract_objects_blob_id_from_content(&content)
+    }
+
+    /// Helper: Extract the Table ID from RemoteState content
+    fn extract_table_id_from_content(&self, _content: &sui_sdk::rpc_types::SuiParsedData) -> Result<ObjectID> {
+        // TODO: This requires parsing the BCS or JSON representation of the Move struct
+        // For now, return a placeholder error
+        anyhow::bail!("Table ID extraction not yet implemented - needs BCS/JSON parsing")
+    }
+
+    /// Helper: Extract string from dynamic field name
+    fn extract_string_from_dynamic_field_name(&self, _name: &DynamicFieldName) -> Result<String> {
+        // TODO: Parse the name value based on its type
+        anyhow::bail!("Dynamic field name parsing not yet implemented")
+    }
+
+    /// Helper: Extract string value from dynamic field content
+    fn extract_string_value_from_content(&self, _content: &sui_sdk::rpc_types::SuiParsedData) -> Result<String> {
+        // TODO: Parse the content to extract the string value
+        anyhow::bail!("Dynamic field value parsing not yet implemented")
+    }
+
+    /// Helper: Extract objects_blob_id from RemoteState content
+    fn extract_objects_blob_id_from_content(&self, _content: &sui_sdk::rpc_types::SuiParsedData) -> Result<Option<String>> {
+        // TODO: Parse the content to extract objects_blob_id field
+        anyhow::bail!("objects_blob_id extraction not yet implemented")
     }
 
     /// Batch upsert refs using PTB
