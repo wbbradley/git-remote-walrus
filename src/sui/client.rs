@@ -3,11 +3,21 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::str::FromStr;
 
-use sui_sdk::{SuiClientBuilder, rpc_types::SuiObjectDataOptions};
+use shared_crypto::intent::{Intent, IntentMessage};
+use sui_config::{sui_config_dir, SUI_KEYSTORE_FILENAME};
+use sui_keys::keystore::{AccountKeystore, FileBasedKeystore};
+use sui_sdk::{
+    rpc_types::{
+        SuiObjectDataOptions, SuiTransactionBlockEffectsAPI, SuiTransactionBlockResponseOptions,
+    },
+    SuiClientBuilder,
+};
 use sui_types::{
     base_types::{ObjectID, ObjectRef, SuiAddress},
+    crypto::Signature,
     programmable_transaction_builder::ProgrammableTransactionBuilder,
-    transaction::{Argument, Command, ObjectArg, TransactionData},
+    quorum_driver_types::ExecuteTransactionRequestType,
+    transaction::{Argument, Command, ObjectArg, Transaction, TransactionData},
     Identifier,
 };
 
@@ -15,7 +25,7 @@ use sui_types::{
 const CLOCK_OBJECT_ID: &str = "0x0000000000000000000000000000000000000000000000000000000000000006";
 
 /// Default gas budget for transactions (1 SUI = 1_000_000_000 MIST)
-const DEFAULT_GAS_BUDGET: u64 = 100_000_000; // 0.1 SUI
+const DEFAULT_GAS_BUDGET: u64 = 10_000_000_000; // 0.1 SUI
 
 /// Sui client for interacting with RemoteState on-chain
 pub struct SuiClient {
@@ -30,20 +40,20 @@ pub struct SuiClient {
 
     /// Sender address (from wallet)
     sender: SuiAddress,
+
+    /// File-based keystore for signing transactions
+    keystore: FileBasedKeystore,
 }
 
 impl SuiClient {
     /// Create a new Sui client
     ///
-    /// Note: This is a simplified implementation. A production version would:
-    /// - Load keystore from wallet_path
-    /// - Support multiple key types
-    /// - Handle gas coin selection
-    /// - Implement retry logic
+    /// Loads the keystore from the wallet_path (or default location) and derives
+    /// the sender address from the first key in the keystore.
     pub async fn new(
         state_object_id: String,
         rpc_url: String,
-        _wallet_path: PathBuf,
+        wallet_path: PathBuf,
     ) -> Result<Self> {
         // Parse state object ID
         let state_object_id = ObjectID::from_hex_literal(&state_object_id)
@@ -55,26 +65,41 @@ impl SuiClient {
             .await
             .context("Failed to build Sui client")?;
 
+        // Load keystore from wallet path or default location
+        let keystore_path = if wallet_path.exists() && wallet_path.is_file() {
+            wallet_path
+        } else {
+            sui_config_dir()
+                .context("Failed to get Sui config directory")?
+                .join(SUI_KEYSTORE_FILENAME)
+        };
+
+        let keystore = FileBasedKeystore::load_or_create(&keystore_path)
+            .with_context(|| format!("Failed to load keystore from {:?}", keystore_path))?;
+
+        // Get the first address from the keystore as sender
+        let addresses = keystore.addresses();
+        let sender = *addresses
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("No addresses found in keystore"))?;
+
         // TODO: Load package ID from the RemoteState object
         // For now, we'll extract it when we read the object
         let package_id = ObjectID::ZERO; // Placeholder
-
-        // TODO: Load sender address from wallet
-        // For now, use a placeholder address
-        let sender = SuiAddress::from_str("0x0")
-            .context("Failed to parse sender address")?;
 
         Ok(Self {
             client,
             state_object_id,
             package_id,
             sender,
+            keystore,
         })
     }
 
     /// Get the object reference for the RemoteState
     async fn get_state_object_ref(&self) -> Result<ObjectRef> {
-        let object = self.client
+        let object = self
+            .client
             .read_api()
             .get_object_with_options(
                 self.state_object_id,
@@ -83,7 +108,8 @@ impl SuiClient {
             .await
             .context("Failed to fetch RemoteState object")?;
 
-        let data = object.data
+        let data = object
+            .data
             .ok_or_else(|| anyhow::anyhow!("RemoteState object not found"))?;
 
         Ok(data.object_ref())
@@ -94,16 +120,15 @@ impl SuiClient {
         let clock_id = ObjectID::from_hex_literal(CLOCK_OBJECT_ID)
             .context("Failed to parse clock object ID")?;
 
-        let object = self.client
+        let object = self
+            .client
             .read_api()
-            .get_object_with_options(
-                clock_id,
-                SuiObjectDataOptions::new().with_owner(),
-            )
+            .get_object_with_options(clock_id, SuiObjectDataOptions::new().with_owner())
             .await
             .context("Failed to fetch Clock object")?;
 
-        let data = object.data
+        let data = object
+            .data
             .ok_or_else(|| anyhow::anyhow!("Clock object not found"))?;
 
         Ok(data.object_ref())
@@ -124,7 +149,9 @@ impl SuiClient {
         // TODO: Implement by reading the RemoteState object's fields
         // Need to deserialize the Move struct to access objects_blob_id field
 
-        anyhow::bail!("get_objects_blob_id not yet fully implemented - needs object deserialization");
+        anyhow::bail!(
+            "get_objects_blob_id not yet fully implemented - needs object deserialization"
+        );
     }
 
     /// Batch upsert refs using PTB
@@ -151,16 +178,12 @@ impl SuiClient {
                 Identifier::new("remote_state")?,
                 Identifier::new("upsert_ref")?,
                 vec![], // no type arguments
-                vec![
-                    state_arg,
-                    ref_arg,
-                    sha_arg,
-                ],
+                vec![state_arg, ref_arg, sha_arg],
             );
         }
 
         // Build and execute transaction
-        self.execute_ptb(ptb).await?;
+        self.execute_ptb(ptb, DEFAULT_GAS_BUDGET).await?;
 
         Ok(())
     }
@@ -189,15 +212,11 @@ impl SuiClient {
             Identifier::new("remote_state")?,
             Identifier::new("acquire_lock")?,
             vec![], // no type arguments
-            vec![
-                state_arg,
-                clock_arg,
-                timeout_arg,
-            ],
+            vec![state_arg, clock_arg, timeout_arg],
         );
 
         // Build and execute transaction
-        self.execute_ptb(ptb).await?;
+        self.execute_ptb(ptb, DEFAULT_GAS_BUDGET).await?;
 
         Ok(())
     }
@@ -226,15 +245,11 @@ impl SuiClient {
             Identifier::new("remote_state")?,
             Identifier::new("update_objects_blob")?,
             vec![], // no type arguments
-            vec![
-                state_arg,
-                blob_arg,
-                clock_arg,
-            ],
+            vec![state_arg, blob_arg, clock_arg],
         );
 
         // Build and execute transaction
-        self.execute_ptb(ptb).await?;
+        self.execute_ptb(ptb, DEFAULT_GAS_BUDGET).await?;
 
         Ok(())
     }
@@ -259,7 +274,7 @@ impl SuiClient {
         );
 
         // Build and execute transaction
-        self.execute_ptb(ptb).await?;
+        self.execute_ptb(ptb, DEFAULT_GAS_BUDGET).await?;
 
         Ok(())
     }
@@ -297,11 +312,7 @@ impl SuiClient {
                 Identifier::new("remote_state")?,
                 Identifier::new("upsert_ref")?,
                 vec![], // no type arguments
-                vec![
-                    state_arg,
-                    ref_arg,
-                    sha_arg,
-                ],
+                vec![state_arg, ref_arg, sha_arg],
             );
         }
 
@@ -313,11 +324,7 @@ impl SuiClient {
             Identifier::new("remote_state")?,
             Identifier::new("update_objects_blob")?,
             vec![], // no type arguments
-            vec![
-                state_arg,
-                objects_blob_arg,
-                clock_arg,
-            ],
+            vec![state_arg, objects_blob_arg, clock_arg],
         );
 
         // 3. Release lock
@@ -330,24 +337,105 @@ impl SuiClient {
         );
 
         // Build and execute transaction (all operations atomic)
-        self.execute_ptb(ptb).await?;
+        self.execute_ptb(ptb, DEFAULT_GAS_BUDGET).await?;
 
         Ok(())
     }
 
     /// Execute a PTB with proper gas handling
-    async fn execute_ptb(&self, ptb: ProgrammableTransactionBuilder) -> Result<()> {
-        // TODO: Implement proper gas coin selection and transaction signing
-        // This requires:
-        // 1. Loading keystore from wallet
-        // 2. Selecting a gas coin with sufficient balance
-        // 3. Getting current gas price
-        // 4. Building TransactionData
-        // 5. Signing with private key
-        // 6. Executing transaction
-        // 7. Waiting for transaction effects
+    async fn execute_ptb(
+        &self,
+        ptb: ProgrammableTransactionBuilder,
+        gas_budget: u64,
+    ) -> Result<()> {
+        // 1. Select enough gas coins to cover the budget
+        let coins = self
+            .client
+            .coin_read_api()
+            .get_coins(self.sender, None, None, Some(500))
+            .await
+            .context("Failed to fetch gas coins")?;
 
-        anyhow::bail!("execute_ptb not yet fully implemented - needs keystore and gas handling");
+        // Collect coins until we have enough balance
+        let mut gas_coins = Vec::new();
+        let mut total_balance = 0u64;
+
+        for coin in coins.data {
+            total_balance += coin.balance;
+            gas_coins.push(coin);
+
+            if total_balance >= gas_budget {
+                break;
+            }
+        }
+
+        if total_balance < gas_budget {
+            anyhow::bail!(
+                "Insufficient gas: need {} MIST, but only have {} MIST available",
+                gas_budget,
+                total_balance
+            );
+        }
+
+        if gas_coins.is_empty() {
+            anyhow::bail!("No gas coins available for sender");
+        }
+
+        // 2. Get current gas price
+        let gas_price = self
+            .client
+            .read_api()
+            .get_reference_gas_price()
+            .await
+            .context("Failed to get reference gas price")?;
+
+        // 3. Build TransactionData with all selected gas coins
+        let pt = ptb.finish();
+        let gas_coin_refs: Vec<_> = gas_coins.iter().map(|c| c.object_ref()).collect();
+        let tx_data = TransactionData::new_programmable(
+            self.sender,
+            gas_coin_refs,
+            pt,
+            gas_budget,
+            gas_price,
+        );
+
+        // 4. Sign transaction with keystore
+        let intent_msg = IntentMessage::new(Intent::sui_transaction(), tx_data.clone());
+        let signature = self
+            .keystore
+            .sign_secure(&self.sender, &intent_msg, Intent::sui_transaction())
+            .await
+            .context("Failed to sign transaction")?;
+
+        // 5. Create signed transaction
+        let transaction = Transaction::from_data(tx_data, vec![signature]);
+
+        // 6. Execute transaction
+        let response = self
+            .client
+            .quorum_driver_api()
+            .execute_transaction_block(
+                transaction,
+                SuiTransactionBlockResponseOptions::default(),
+                Some(ExecuteTransactionRequestType::WaitForLocalExecution),
+            )
+            .await
+            .context("Failed to execute transaction")?;
+
+        // 7. Check for errors in transaction execution
+        if let Some(effects) = &response.effects {
+            if effects.status().is_err() {
+                anyhow::bail!("Transaction execution failed: {:?}", effects.status());
+            }
+        }
+
+        eprintln!(
+            "sui: Transaction executed successfully: {}",
+            response.digest
+        );
+
+        Ok(())
     }
 }
 
