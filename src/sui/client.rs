@@ -1,14 +1,14 @@
 use anyhow::{Context, Result};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::str::FromStr;
 
 use shared_crypto::intent::{Intent, IntentMessage};
 use sui_config::{sui_config_dir, SUI_KEYSTORE_FILENAME};
 use sui_keys::keystore::{AccountKeystore, FileBasedKeystore};
 use sui_sdk::{
     rpc_types::{
-        SuiObjectDataOptions, SuiTransactionBlockEffectsAPI, SuiTransactionBlockResponseOptions,
+        SuiMoveStruct, SuiMoveValue, SuiObjectDataOptions, SuiParsedData,
+        SuiTransactionBlockEffectsAPI, SuiTransactionBlockResponseOptions,
     },
     SuiClientBuilder,
 };
@@ -18,7 +18,7 @@ use sui_types::{
     dynamic_field::DynamicFieldName,
     programmable_transaction_builder::ProgrammableTransactionBuilder,
     quorum_driver_types::ExecuteTransactionRequestType,
-    transaction::{Argument, Command, ObjectArg, Transaction, TransactionData},
+    transaction::{ObjectArg, Transaction, TransactionData},
     Identifier,
 };
 
@@ -143,9 +143,7 @@ impl SuiClient {
             .read_api()
             .get_object_with_options(
                 self.state_object_id,
-                SuiObjectDataOptions::new()
-                    .with_content()
-                    .with_bcs(),
+                SuiObjectDataOptions::new().with_content().with_bcs(),
             )
             .await
             .context("Failed to fetch RemoteState object")?;
@@ -161,7 +159,8 @@ impl SuiClient {
             .ok_or_else(|| anyhow::anyhow!("RemoteState has no content"))?;
 
         // Get the refs Table's ObjectID from the struct
-        let table_id = self.extract_table_id_from_content(&content)
+        let table_id = self
+            .extract_table_id_from_content(&content)
             .context("Failed to extract refs table ID")?;
 
         // Query all dynamic fields of the Table
@@ -214,9 +213,7 @@ impl SuiClient {
             .read_api()
             .get_object_with_options(
                 self.state_object_id,
-                SuiObjectDataOptions::new()
-                    .with_content()
-                    .with_bcs(),
+                SuiObjectDataOptions::new().with_content().with_bcs(),
             )
             .await
             .context("Failed to fetch RemoteState object")?;
@@ -234,28 +231,138 @@ impl SuiClient {
     }
 
     /// Helper: Extract the Table ID from RemoteState content
-    fn extract_table_id_from_content(&self, _content: &sui_sdk::rpc_types::SuiParsedData) -> Result<ObjectID> {
-        // TODO: This requires parsing the BCS or JSON representation of the Move struct
-        // For now, return a placeholder error
-        anyhow::bail!("Table ID extraction not yet implemented - needs BCS/JSON parsing")
+    fn extract_table_id_from_content(&self, content: &SuiParsedData) -> Result<ObjectID> {
+        use sui_sdk::rpc_types::SuiParsedData;
+
+        // Get the MoveObject variant
+        let move_obj = match content {
+            SuiParsedData::MoveObject(obj) => obj,
+            _ => anyhow::bail!("Expected MoveObject, got package"),
+        };
+
+        // Access the fields
+        let fields = &move_obj.fields;
+
+        // Extract the "refs" field which should be a Table (UID with id)
+        let refs_field = self
+            .get_struct_field(fields, "refs")
+            .context("Failed to get 'refs' field from RemoteState")?;
+
+        // The Table is represented as a UID { id: ObjectID }
+        let table_id = self
+            .extract_uid_id(refs_field)
+            .context("Failed to extract ObjectID from refs Table UID")?;
+
+        Ok(table_id)
     }
 
     /// Helper: Extract string from dynamic field name
-    fn extract_string_from_dynamic_field_name(&self, _name: &DynamicFieldName) -> Result<String> {
-        // TODO: Parse the name value based on its type
-        anyhow::bail!("Dynamic field name parsing not yet implemented")
+    fn extract_string_from_dynamic_field_name(&self, name: &DynamicFieldName) -> Result<String> {
+        // The name.value is a serde_json::Value
+        // For String keys, it should be a JSON string
+        name.value
+            .as_str()
+            .map(|s| s.to_string())
+            .ok_or_else(|| anyhow::anyhow!("Dynamic field name is not a string: {:?}", name.value))
     }
 
     /// Helper: Extract string value from dynamic field content
-    fn extract_string_value_from_content(&self, _content: &sui_sdk::rpc_types::SuiParsedData) -> Result<String> {
-        // TODO: Parse the content to extract the string value
-        anyhow::bail!("Dynamic field value parsing not yet implemented")
+    fn extract_string_value_from_content(&self, content: &SuiParsedData) -> Result<String> {
+        // Dynamic field values are wrapped in a Field struct
+        let move_obj = match content {
+            SuiParsedData::MoveObject(obj) => obj,
+            _ => anyhow::bail!("Expected MoveObject for dynamic field value"),
+        };
+
+        // The value is in a "value" field
+        let value_field = self
+            .get_struct_field(&move_obj.fields, "value")
+            .context("Failed to get 'value' field from dynamic field")?;
+
+        // Extract the string
+        self.extract_string(value_field)
+            .context("Failed to extract string from dynamic field value")
     }
 
     /// Helper: Extract objects_blob_id from RemoteState content
-    fn extract_objects_blob_id_from_content(&self, _content: &sui_sdk::rpc_types::SuiParsedData) -> Result<Option<String>> {
-        // TODO: Parse the content to extract objects_blob_id field
-        anyhow::bail!("objects_blob_id extraction not yet implemented")
+    fn extract_objects_blob_id_from_content(
+        &self,
+        content: &SuiParsedData,
+    ) -> Result<Option<String>> {
+        let move_obj = match content {
+            SuiParsedData::MoveObject(obj) => obj,
+            _ => anyhow::bail!("Expected MoveObject"),
+        };
+
+        // Extract the "objects_blob_id" field which is Option<String>
+        let blob_id_field = self
+            .get_struct_field(&move_obj.fields, "objects_blob_id")
+            .context("Failed to get 'objects_blob_id' field")?;
+
+        // Extract Option<String>
+        self.extract_option_string(blob_id_field)
+            .context("Failed to extract Option<String> from objects_blob_id")
+    }
+
+    /// Helper: Get a field from SuiMoveStruct
+    fn get_struct_field<'a>(
+        &self,
+        fields: &'a SuiMoveStruct,
+        field_name: &str,
+    ) -> Result<&'a SuiMoveValue> {
+        let field_map = match fields {
+            SuiMoveStruct::WithFields(map) | SuiMoveStruct::WithTypes { fields: map, .. } => map,
+            SuiMoveStruct::Runtime(_) => anyhow::bail!("Cannot access fields in Runtime variant"),
+        };
+
+        field_map
+            .get(field_name)
+            .ok_or_else(|| anyhow::anyhow!("Field '{}' not found", field_name))
+    }
+
+    /// Helper: Extract ObjectID from a UID field
+    fn extract_uid_id(&self, value: &SuiMoveValue) -> Result<ObjectID> {
+        use sui_sdk::rpc_types::SuiMoveValue;
+
+        match value {
+            SuiMoveValue::Struct(sui_struct) => {
+                // UID is a struct with an "id" field
+                let id_field = self
+                    .get_struct_field(sui_struct, "id")
+                    .context("Failed to get 'id' field from UID")?;
+
+                // The id field should be a UID { id: ObjectID }
+                if let SuiMoveValue::UID { id } = id_field {
+                    Ok(*id)
+                } else {
+                    anyhow::bail!("Expected UID variant, got {:?}", id_field)
+                }
+            }
+            _ => anyhow::bail!("Expected Struct for UID, got {:?}", value),
+        }
+    }
+
+    /// Helper: Extract String from SuiMoveValue
+    fn extract_string(&self, value: &SuiMoveValue) -> Result<String> {
+        use sui_sdk::rpc_types::SuiMoveValue;
+
+        match value {
+            SuiMoveValue::String(s) => Ok(s.clone()),
+            _ => anyhow::bail!("Expected String, got {:?}", value),
+        }
+    }
+
+    /// Helper: Extract Option<String> from SuiMoveValue
+    fn extract_option_string(&self, value: &SuiMoveValue) -> Result<Option<String>> {
+        use sui_sdk::rpc_types::SuiMoveValue;
+
+        match value {
+            SuiMoveValue::Option(opt) => match opt.as_ref() {
+                Some(inner) => Ok(Some(self.extract_string(inner)?)),
+                None => Ok(None),
+            },
+            _ => anyhow::bail!("Expected Option, got {:?}", value),
+        }
     }
 
     /// Batch upsert refs using PTB
@@ -506,7 +613,7 @@ impl SuiClient {
 
         // 4. Sign transaction with keystore
         let intent_msg = IntentMessage::new(Intent::sui_transaction(), tx_data.clone());
-        let signature = self
+        let signature: Signature = self
             .keystore
             .sign_secure(&self.sender, &intent_msg, Intent::sui_transaction())
             .await
