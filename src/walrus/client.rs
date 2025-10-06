@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 use tempfile::NamedTempFile;
 
@@ -17,6 +17,7 @@ pub struct BlobStatus {
 /// Walrus epoch information
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
 pub struct EpochInfo {
     pub current_epoch: u64,
     #[serde(default)]

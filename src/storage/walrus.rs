@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
-use std::path::PathBuf;
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 use super::traits::{ContentId, ImmutableStore, MutableState, StorageBackend};
 use super::{CacheIndex, FilesystemStorage, State};
@@ -32,6 +32,9 @@ pub struct WalrusStorage {
     /// Sui client for on-chain state (currently stub)
     sui_client: SuiClient,
 
+    /// Tokio runtime for async operations
+    runtime: tokio::runtime::Runtime,
+
     /// Cache index (blob_id ↔ sha256) path
     cache_index_path: PathBuf,
 
@@ -43,30 +46,27 @@ impl WalrusStorage {
     /// Create a new WalrusStorage instance
     pub fn new(state_object_id: String) -> Result<Self> {
         // Load configuration
-        let config = WalrusConfig::load()
-            .context("Failed to load configuration")?;
+        let config = WalrusConfig::load().context("Failed to load configuration")?;
 
         // Ensure cache directory exists
         let cache_dir = config.ensure_cache_dir()?;
 
         // Create cache storage
-        let cache = FilesystemStorage::new(&cache_dir)
-            .context("Failed to create cache storage")?;
+        let cache = FilesystemStorage::new(&cache_dir).context("Failed to create cache storage")?;
 
         // Create Walrus client
-        let walrus_client = WalrusClient::new(
-            config.walrus_config_path.clone(),
-            config.default_epochs,
-        );
+        let walrus_client =
+            WalrusClient::new(config.walrus_config_path.clone(), config.default_epochs);
+
+        // Create tokio runtime for async operations
+        let runtime = tokio::runtime::Runtime::new().context("Failed to create tokio runtime")?;
 
         // Create Sui client (need to block on async constructor)
-        let sui_client = tokio::runtime::Runtime::new()
-            .context("Failed to create tokio runtime")?
-            .block_on(SuiClient::new(
-                state_object_id.clone(),
-                config.sui_rpc_url.clone(),
-                config.sui_wallet_path.clone(),
-            ))?;
+        let sui_client = runtime.block_on(SuiClient::new(
+            state_object_id.clone(),
+            config.sui_rpc_url.clone(),
+            config.sui_wallet_path.clone(),
+        ))?;
 
         // Set up paths
         let cache_index_path = cache_dir.join("cache_index.yaml");
@@ -78,6 +78,7 @@ impl WalrusStorage {
             cache,
             walrus_client,
             sui_client,
+            runtime,
             cache_index_path,
             blob_tracker_path,
         })
@@ -92,30 +93,31 @@ impl WalrusStorage {
 
     /// Load cache index
     fn load_cache_index(&self) -> Result<CacheIndex> {
-        CacheIndex::load(&self.cache_index_path)
-            .context("Failed to load cache index")
+        CacheIndex::load(&self.cache_index_path).context("Failed to load cache index")
     }
 
     /// Save cache index
     fn save_cache_index(&self, index: &CacheIndex) -> Result<()> {
-        index.save(&self.cache_index_path)
+        index
+            .save(&self.cache_index_path)
             .context("Failed to save cache index")
     }
 
     /// Load blob tracker
     fn load_blob_tracker(&self) -> Result<BlobTracker> {
-        BlobTracker::load(&self.blob_tracker_path)
-            .context("Failed to load blob tracker")
+        BlobTracker::load(&self.blob_tracker_path).context("Failed to load blob tracker")
     }
 
     /// Save blob tracker
     fn save_blob_tracker(&self, tracker: &BlobTracker) -> Result<()> {
-        tracker.save(&self.blob_tracker_path)
+        tracker
+            .save(&self.blob_tracker_path)
             .context("Failed to save blob tracker")
     }
 
     /// Check for blob expiration warnings and emit to stderr
     fn check_blob_expiration(&self) -> Result<()> {
+        eprintln!("git-remote-walrus: Checking blob expiration...");
         let tracker = self.load_blob_tracker()?;
 
         if tracker.count() == 0 {
@@ -123,26 +125,31 @@ impl WalrusStorage {
         }
 
         // Get current Walrus epoch
-        let epoch_info = match self.walrus_client.current_epoch() {
-            Ok(info) => info,
+        let current_epoch = match self.walrus_client.current_epoch() {
+            Ok(info) => info.current_epoch,
             Err(e) => {
-                eprintln!("git-remote-walrus: Warning: Failed to get current Walrus epoch: {}", e);
+                eprintln!(
+                    "git-remote-walrus: Warning: Failed to get current Walrus epoch: {}",
+                    e
+                );
                 return Ok(());
             }
         };
 
-        let current_epoch = epoch_info.current_epoch;
-
         // Check for expiration warnings
-        let (should_warn, min_epoch, expiring_soon) = tracker.check_expiration_warning(
-            current_epoch,
-            self.config.expiration_warning_threshold,
-        );
+        let (should_warn, min_epoch, expiring_soon) = tracker
+            .check_expiration_warning(current_epoch, self.config.expiration_warning_threshold);
 
         if should_warn {
-            eprintln!("git-remote-walrus: ⚠️  WARNING: {} blob(s) expiring soon!", expiring_soon.len());
+            eprintln!(
+                "git-remote-walrus: ⚠️  WARNING: {} blob(s) expiring soon!",
+                expiring_soon.len()
+            );
             eprintln!("  Current Walrus epoch: {}", current_epoch);
-            eprintln!("  Warning threshold: {} epochs", self.config.expiration_warning_threshold);
+            eprintln!(
+                "  Warning threshold: {} epochs",
+                self.config.expiration_warning_threshold
+            );
 
             if let Some(min) = min_epoch {
                 eprintln!("  Earliest expiration: epoch {}", min);
@@ -151,15 +158,20 @@ impl WalrusStorage {
             // List expiring blobs
             for blob in expiring_soon.iter().take(5) {
                 let epochs_remaining = blob.end_epoch.saturating_sub(current_epoch);
-                eprintln!("    - {} expires in {} epoch(s)",
-                         &blob.blob_id[..16], epochs_remaining);
+                eprintln!(
+                    "    - {} expires in {} epoch(s)",
+                    &blob.blob_id[..16],
+                    epochs_remaining
+                );
             }
 
             if expiring_soon.len() > 5 {
                 eprintln!("    ... and {} more", expiring_soon.len() - 5);
             }
 
-            eprintln!("  Action required: Re-upload expiring blobs or repository may become inaccessible");
+            eprintln!(
+                "  Action required: Re-upload expiring blobs or repository may become inaccessible"
+            );
         } else {
             eprintln!("git-remote-walrus: Tracking {} blob(s), earliest expiration at epoch {} (current: {})",
                      tracker.count(), min_epoch.unwrap_or(0), current_epoch);
@@ -178,19 +190,28 @@ impl ImmutableStore for WalrusStorage {
 
         if let Some(blob_id) = cache_index.get_blob_id(&sha256) {
             // Already cached, return blob_id
-            eprintln!("git-remote-walrus: Object {} already cached as {}",
-                     &sha256[..8], &blob_id[..16]);
+            eprintln!(
+                "git-remote-walrus: Object {} already cached as {}",
+                &sha256[..8],
+                &blob_id[..16]
+            );
             return Ok(blob_id.clone());
         }
 
         // 2. Upload to Walrus
-        eprintln!("git-remote-walrus: Uploading object {} ({} bytes)",
-                 &sha256[..8], content.len());
-        let blob_id = self.walrus_client.store(content)
+        eprintln!(
+            "git-remote-walrus: Uploading object {} ({} bytes)",
+            &sha256[..8],
+            content.len()
+        );
+        let blob_id = self
+            .walrus_client
+            .store(content)
             .context("Failed to store object in Walrus")?;
 
         // 3. Store in local cache
-        self.cache.write_object(content)
+        self.cache
+            .write_object(content)
             .context("Failed to cache object locally")?;
 
         // 4. Update cache index
@@ -207,7 +228,10 @@ impl ImmutableStore for WalrusStorage {
                 }
             }
             Err(e) => {
-                eprintln!("git-remote-walrus: Warning: Failed to get blob status: {}", e);
+                eprintln!(
+                    "git-remote-walrus: Warning: Failed to get blob status: {}",
+                    e
+                );
             }
         }
 
@@ -217,7 +241,8 @@ impl ImmutableStore for WalrusStorage {
     fn write_objects(&self, contents: &[&[u8]]) -> Result<Vec<ContentId>> {
         // Simple implementation: write sequentially
         // TODO: Could optimize with parallel uploads in the future
-        contents.iter()
+        contents
+            .iter()
             .map(|content| self.write_object(content))
             .collect()
     }
@@ -242,7 +267,9 @@ impl ImmutableStore for WalrusStorage {
 
         // 2. Read from Walrus
         eprintln!("git-remote-walrus: Downloading from Walrus: {}", &id[..16]);
-        let content = self.walrus_client.read(id)
+        let content = self
+            .walrus_client
+            .read(id)
             .with_context(|| format!("Failed to read object {} from Walrus", id))?;
 
         // 3. Cache it locally
@@ -260,9 +287,7 @@ impl ImmutableStore for WalrusStorage {
     fn read_objects(&self, ids: &[&str]) -> Result<Vec<Vec<u8>>> {
         // Simple implementation: read sequentially
         // TODO: Could optimize with parallel reads in the future
-        ids.iter()
-            .map(|id| self.read_object(id))
-            .collect()
+        ids.iter().map(|id| self.read_object(id)).collect()
     }
 
     fn delete_object(&self, id: &str) -> Result<()> {
@@ -295,41 +320,102 @@ impl ImmutableStore for WalrusStorage {
 
 impl MutableState for WalrusStorage {
     fn read_state(&self) -> Result<State> {
-        // TODO: This is a stub implementation until SuiClient is complete
-        // The real implementation should:
-        // 1. Read refs from Sui on-chain (self.sui_client.read_refs().await?)
-        // 2. Get objects_blob_id from Sui (self.sui_client.get_objects_blob_id().await?)
-        // 3. If objects_blob_id exists, download objects map from Walrus
-        // 4. Construct State with refs and objects
+        eprintln!(
+            "git-remote-walrus: Reading state from {}",
+            &self.state_object_id[..8]
+        );
 
-        eprintln!("git-remote-walrus: Reading state from {}", &self.state_object_id[..8]);
+        // Read refs from Sui on-chain
+        let refs = self
+            .runtime
+            .block_on(self.sui_client.read_refs())
+            .context("Failed to read refs from Sui")?;
 
-        // For now, return empty state
-        // This will be replaced with actual implementation once SuiClient is ready
-        Ok(State::default())
+        eprintln!("  Retrieved {} refs from Sui", refs.len());
+
+        // Get objects_blob_id from Sui
+        let objects_blob_id = self
+            .runtime
+            .block_on(self.sui_client.get_objects_blob_id())
+            .context("Failed to get objects blob ID from Sui")?;
+
+        // Download objects map from Walrus if it exists
+        let objects = if let Some(blob_id) = objects_blob_id {
+            eprintln!(
+                "  Downloading objects map from Walrus (blob_id: {})",
+                &blob_id[..16]
+            );
+            let objects_yaml = self
+                .walrus_client
+                .read(&blob_id)
+                .context("Failed to read objects map from Walrus")?;
+            serde_yaml::from_slice(&objects_yaml).context("Failed to parse objects map YAML")?
+        } else {
+            eprintln!("  No objects blob ID found, starting with empty objects map");
+            BTreeMap::new()
+        };
+
+        eprintln!("  Retrieved {} objects mappings", objects.len());
+
+        Ok(State { refs, objects })
     }
 
     fn write_state(&self, state: &State) -> Result<()> {
-        // TODO: This is a stub implementation until SuiClient is complete
-        // The real implementation should:
-        // 1. Serialize objects map to YAML
-        // 2. Upload objects map to Walrus
-        // 3. Acquire lock on RemoteState
-        // 4. Use PTB to:
-        //    - Batch update all refs
-        //    - Update objects_blob_id
-        //    - Release lock
-
-        eprintln!("git-remote-walrus: Writing state to {} ({} refs, {} objects)",
-                 &self.state_object_id[..8],
-                 state.refs.len(),
-                 state.objects.len());
+        eprintln!(
+            "git-remote-walrus: Writing state to {} ({} refs, {} objects)",
+            &self.state_object_id[..8],
+            state.refs.len(),
+            state.objects.len()
+        );
 
         // Check for blob expiration warnings
         let _ = self.check_blob_expiration();
 
-        // For now, do nothing
-        // This will be replaced with actual implementation once SuiClient is ready
+        // Serialize objects map to YAML
+        eprintln!("  Serializing objects map...");
+        let objects_yaml_str = serde_yaml::to_string(&state.objects)
+            .context("Failed to serialize objects map to YAML")?;
+        let objects_yaml = objects_yaml_str.as_bytes();
+
+        // Upload objects map to Walrus
+        eprintln!(
+            "  Uploading objects map to Walrus ({} bytes)...",
+            objects_yaml.len()
+        );
+        let objects_blob_id = self
+            .walrus_client
+            .store(objects_yaml)
+            .context("Failed to upload objects map to Walrus")?;
+
+        eprintln!("  Objects blob ID: {}", &objects_blob_id[..16]);
+
+        // Acquire lock on RemoteState (5 minute timeout)
+        eprintln!("  Acquiring lock on RemoteState...");
+        self.runtime
+            .block_on(self.sui_client.acquire_lock(300_000))
+            .context("Failed to acquire lock on RemoteState")?;
+
+        // Convert refs to Vec for PTB
+        let refs: Vec<(String, String)> = state
+            .refs
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+
+        // Execute atomic PTB: update refs + update objects_blob_id + release lock
+        eprintln!(
+            "  Executing atomic PTB (updating {} refs + objects blob)...",
+            refs.len()
+        );
+        self.runtime
+            .block_on(
+                self.sui_client
+                    .upsert_refs_and_update_objects(refs, objects_blob_id),
+            )
+            .context("Failed to execute atomic PTB")?;
+
+        eprintln!("  State successfully written to Sui");
+
         Ok(())
     }
 
@@ -353,7 +439,8 @@ impl StorageBackend for WalrusStorage {
         eprintln!("  Sui RPC: {}", self.config.sui_rpc_url);
 
         // Initialize cache
-        self.cache.initialize()
+        self.cache
+            .initialize()
             .context("Failed to initialize cache")?;
 
         // Check blob expiration warnings

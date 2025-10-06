@@ -25,7 +25,7 @@ enum RemoteType {
 /// This allows us to use different storage types with the protocol handler
 enum Storage {
     Filesystem(FilesystemStorage),
-    Walrus(WalrusStorage),
+    Walrus(Box<WalrusStorage>),
 }
 
 // Implement StorageBackend traits for Storage enum by delegating to inner types
@@ -142,7 +142,7 @@ fn main() -> Result<()> {
         RemoteType::Sui(object_id) => {
             eprintln!("git-remote-walrus: Using Walrus+Sui storage: {}", object_id);
             let walrus_storage = WalrusStorage::new(object_id)?;
-            Storage::Walrus(walrus_storage)
+            Storage::Walrus(Box::new(walrus_storage))
         }
     };
 

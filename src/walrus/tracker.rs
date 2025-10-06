@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
 use std::fs;
+use std::path::{Path, PathBuf};
 
 /// Information about a tracked blob
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -26,12 +26,14 @@ pub struct BlobTracker {
 
 impl BlobTracker {
     /// Create a new blob tracker
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Load blob tracker from file
     pub fn load(path: &Path) -> Result<Self> {
+        eprintln!("git-remote-walrus: Loading blob tracker from {:?}", path);
         if !path.exists() {
             return Ok(Self::default());
         }
@@ -53,8 +55,7 @@ impl BlobTracker {
                 .with_context(|| format!("Failed to create directory {:?}", parent))?;
         }
 
-        let content = serde_yaml::to_string(self)
-            .context("Failed to serialize blob tracker")?;
+        let content = serde_yaml::to_string(self).context("Failed to serialize blob tracker")?;
 
         fs::write(path, content)
             .with_context(|| format!("Failed to write blob tracker to {:?}", path))?;
@@ -75,6 +76,7 @@ impl BlobTracker {
     }
 
     /// Get blob info
+    #[allow(dead_code)]
     pub fn get_blob(&self, blob_id: &str) -> Option<&BlobInfo> {
         self.blobs.get(blob_id)
     }
@@ -93,11 +95,13 @@ impl BlobTracker {
     }
 
     /// Remove blob from tracking
+    #[allow(dead_code)]
     pub fn untrack_blob(&mut self, blob_id: &str) -> Option<BlobInfo> {
         self.blobs.remove(blob_id)
     }
 
     /// Get all tracked blobs
+    #[allow(dead_code)]
     pub fn all_blobs(&self) -> impl Iterator<Item = &BlobInfo> {
         self.blobs.values()
     }
@@ -109,7 +113,11 @@ impl BlobTracker {
 
     /// Check if we should warn about expiring blobs
     /// Returns (should_warn, min_epoch, blobs_expiring_soon)
-    pub fn check_expiration_warning(&self, current_epoch: u64, warning_threshold: u64) -> (bool, Option<u64>, Vec<&BlobInfo>) {
+    pub fn check_expiration_warning(
+        &self,
+        current_epoch: u64,
+        warning_threshold: u64,
+    ) -> (bool, Option<u64>, Vec<&BlobInfo>) {
         let min_epoch = self.min_end_epoch();
 
         if let Some(min) = min_epoch {
@@ -126,6 +134,7 @@ impl BlobTracker {
 }
 
 /// Helper to determine blob tracker path from cache directory
+#[allow(dead_code)]
 pub fn blob_tracker_path(cache_dir: &Path) -> PathBuf {
     cache_dir.join("blob_tracker.yaml")
 }

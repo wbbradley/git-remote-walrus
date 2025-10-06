@@ -19,6 +19,7 @@ pub struct CacheIndex {
 
 impl CacheIndex {
     /// Create a new empty cache index
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self::default()
     }
@@ -72,16 +73,19 @@ impl CacheIndex {
     }
 
     /// Check if blob_id exists in index
+    #[allow(dead_code)]
     pub fn contains_blob(&self, blob_id: &str) -> bool {
         self.blob_to_sha256.contains_key(blob_id)
     }
 
     /// Check if sha256 exists in index
+    #[allow(dead_code)]
     pub fn contains_sha256(&self, sha256: &str) -> bool {
         self.sha256_to_blob.contains_key(sha256)
     }
 
     /// Remove a mapping
+    #[allow(dead_code)]
     pub fn remove_by_blob_id(&mut self, blob_id: &str) -> Option<String> {
         if let Some(sha256) = self.blob_to_sha256.remove(blob_id) {
             self.sha256_to_blob.remove(&sha256);
@@ -92,6 +96,7 @@ impl CacheIndex {
     }
 
     /// Remove a mapping by SHA-256
+    #[allow(dead_code)]
     pub fn remove_by_sha256(&mut self, sha256: &str) -> Option<String> {
         if let Some(blob_id) = self.sha256_to_blob.remove(sha256) {
             self.blob_to_sha256.remove(&blob_id);
@@ -102,21 +107,25 @@ impl CacheIndex {
     }
 
     /// Get all blob_ids
+    #[allow(dead_code)]
     pub fn all_blob_ids(&self) -> impl Iterator<Item = &String> {
         self.blob_to_sha256.keys()
     }
 
     /// Get all sha256 hashes
+    #[allow(dead_code)]
     pub fn all_sha256s(&self) -> impl Iterator<Item = &String> {
         self.sha256_to_blob.keys()
     }
 
     /// Get count of indexed items
+    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.blob_to_sha256.len()
     }
 
     /// Check if index is empty
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.blob_to_sha256.is_empty()
     }

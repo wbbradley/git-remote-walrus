@@ -366,6 +366,7 @@ impl SuiClient {
     }
 
     /// Batch upsert refs using PTB
+    #[allow(dead_code)]
     pub async fn upsert_refs_batch(&self, refs: Vec<(String, String)>) -> Result<()> {
         if refs.is_empty() {
             return Ok(());
@@ -433,6 +434,7 @@ impl SuiClient {
     }
 
     /// Update objects blob ID (requires lock)
+    #[allow(dead_code)]
     pub async fn update_objects_blob(&self, blob_id: &str) -> Result<()> {
         let mut ptb = ProgrammableTransactionBuilder::new();
 
@@ -466,6 +468,7 @@ impl SuiClient {
     }
 
     /// Release lock
+    #[allow(dead_code)]
     pub async fn release_lock(&self) -> Result<()> {
         let mut ptb = ProgrammableTransactionBuilder::new();
 

@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 use std::env;
+use std::path::PathBuf;
 
 /// Configuration for git-remote-walrus
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -20,20 +20,22 @@ pub struct WalrusConfig {
     pub cache_dir: PathBuf,
 
     /// Default number of epochs for blob storage
-    #[serde(default = "default_epochs")]
+    #[serde(default = "defaults::default_epochs")]
     pub default_epochs: u32,
 
     /// Warning threshold for blob expiration (epochs)
-    #[serde(default = "default_warning_threshold")]
+    #[serde(default = "defaults::default_warning_threshold")]
     pub expiration_warning_threshold: u64,
 }
 
-fn default_epochs() -> u32 {
-    5
-}
+mod defaults {
+    pub(crate) fn default_epochs() -> u32 {
+        5
+    }
 
-fn default_warning_threshold() -> u64 {
-    10
+    pub(crate) fn default_warning_threshold() -> u64 {
+        10
+    }
 }
 
 impl WalrusConfig {
@@ -68,12 +70,14 @@ impl WalrusConfig {
         }
 
         if let Ok(epochs) = env::var("WALRUS_BLOB_EPOCHS") {
-            config.default_epochs = epochs.parse()
+            config.default_epochs = epochs
+                .parse()
                 .context("Failed to parse WALRUS_BLOB_EPOCHS as u32")?;
         }
 
         if let Ok(threshold) = env::var("WALRUS_EXPIRATION_WARNING_THRESHOLD") {
-            config.expiration_warning_threshold = threshold.parse()
+            config.expiration_warning_threshold = threshold
+                .parse()
                 .context("Failed to parse WALRUS_EXPIRATION_WARNING_THRESHOLD as u64")?;
         }
 
@@ -92,6 +96,7 @@ impl WalrusConfig {
     }
 
     /// Save configuration to file
+    #[allow(dead_code)]
     pub fn save(&self, path: &PathBuf) -> Result<()> {
         // Ensure directory exists
         if let Some(parent) = path.parent() {
@@ -99,8 +104,7 @@ impl WalrusConfig {
                 .with_context(|| format!("Failed to create config directory: {:?}", parent))?;
         }
 
-        let content = serde_yaml::to_string(self)
-            .context("Failed to serialize config")?;
+        let content = serde_yaml::to_string(self).context("Failed to serialize config")?;
 
         std::fs::write(path, content)
             .with_context(|| format!("Failed to write config file: {:?}", path))?;
@@ -110,11 +114,7 @@ impl WalrusConfig {
 
     /// Get default config file path
     pub fn config_file_path() -> Option<PathBuf> {
-        if let Some(home) = dirs::home_dir() {
-            Some(home.join(".config/git-remote-walrus/config.yaml"))
-        } else {
-            None
-        }
+        dirs::home_dir().map(|home| home.join(".config/git-remote-walrus/config.yaml"))
     }
 
     /// Get cache directory, creating it if necessary
