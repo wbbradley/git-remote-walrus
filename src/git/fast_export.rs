@@ -1,6 +1,6 @@
+use std::{collections::HashMap, io::BufRead};
+
 use anyhow::{Context, Result};
-use std::collections::HashMap;
-use std::io::BufRead;
 
 /// Parse a fast-export stream and return the raw data plus ref updates
 /// Returns: (stream_bytes, ref_updates_map)

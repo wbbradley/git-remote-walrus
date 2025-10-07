@@ -1,11 +1,13 @@
 //! Handle fetch command - write objects to .git/objects (no fast-export)
 
-use anyhow::{Context, Result};
-use std::io::Write;
-use std::process::{Command, Stdio};
+use std::{
+    io::Write,
+    process::{Command, Stdio},
+};
 
-use crate::pack::send_pack;
-use crate::storage::StorageBackend;
+use anyhow::{Context, Result};
+
+use crate::{pack::send_pack, storage::StorageBackend};
 
 /// Handle fetch command - write objects to .git/objects for requested refs
 /// This replaces the old import handler and eliminates fast-export
@@ -24,8 +26,7 @@ pub fn handle<S: StorageBackend, W: Write>(
     send_pack(refs, storage, &mut packfile)?;
 
     // Write packfile to .git/objects using git index-pack
-    let git_dir = std::env::var("GIT_DIR")
-        .unwrap_or_else(|_| ".git".to_string());
+    let git_dir = std::env::var("GIT_DIR").unwrap_or_else(|_| ".git".to_string());
 
     let mut index_pack = Command::new("git")
         .arg("--git-dir")
@@ -41,21 +42,38 @@ pub fn handle<S: StorageBackend, W: Write>(
         .context("Failed to spawn git index-pack")?;
 
     // Write packfile to stdin
-    index_pack.stdin.as_mut().unwrap().write_all(&packfile)
+    index_pack
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(&packfile)
         .context("Failed to write packfile to git index-pack")?;
     drop(index_pack.stdin.take());
 
     // Wait for git index-pack to complete
-    let result = index_pack.wait_with_output()
+    let result = index_pack
+        .wait_with_output()
         .context("Failed to wait for git index-pack")?;
 
     if !result.status.success() {
-        eprintln!("git index-pack stderr: {}", String::from_utf8_lossy(&result.stderr));
-        anyhow::bail!("git index-pack failed: {}", String::from_utf8_lossy(&result.stderr));
+        eprintln!(
+            "git index-pack stderr: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        anyhow::bail!(
+            "git index-pack failed: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
     }
 
-    eprintln!("git index-pack output: {}", String::from_utf8_lossy(&result.stdout));
-    eprintln!("git index-pack stderr: {}", String::from_utf8_lossy(&result.stderr));
+    eprintln!(
+        "git index-pack output: {}",
+        String::from_utf8_lossy(&result.stdout)
+    );
+    eprintln!(
+        "git index-pack stderr: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
 
     // Output blank line to signal completion
     writeln!(output)?;

@@ -1,7 +1,7 @@
+use std::{env, path::PathBuf};
+
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::env;
-use std::path::PathBuf;
 
 /// Configuration for git-remote-walrus
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -114,8 +114,9 @@ mod defaults {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tempfile::tempdir;
+
+    use super::*;
 
     #[test]
     fn test_save_and_load() {

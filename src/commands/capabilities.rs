@@ -1,5 +1,6 @@
-use anyhow::Result;
 use std::io::Write;
+
+use anyhow::Result;
 
 /// Handle the capabilities command
 /// Output the capabilities this remote helper supports

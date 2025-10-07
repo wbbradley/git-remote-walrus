@@ -3,9 +3,12 @@
 //! These tests require the git-remote-walrus binary to be built.
 //! Run with: cargo test --release
 
-use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::sync::Once;
+use std::{
+    path::{Path, PathBuf},
+    process::Command,
+    sync::Once,
+};
+
 use tempfile::TempDir;
 
 static INIT: Once = Once::new();
@@ -287,10 +290,7 @@ fn test_object_deduplication_across_pushes() {
     let state_file = storage.join("state.yaml");
     let state_content = std::fs::read_to_string(&state_file).unwrap();
     let state: serde_yaml::Value = serde_yaml::from_str(&state_content).unwrap();
-    let objects_after_first_push = state["objects"]
-        .as_mapping()
-        .map(|m| m.len())
-        .unwrap_or(0);
+    let objects_after_first_push = state["objects"].as_mapping().map(|m| m.len()).unwrap_or(0);
 
     eprintln!("Objects after first push: {}", objects_after_first_push);
     eprintln!("State after first push:\n{}", state_content);
@@ -306,10 +306,7 @@ fn test_object_deduplication_across_pushes() {
     // Step 6: Count objects again and investigate
     let state_content = std::fs::read_to_string(&state_file).unwrap();
     let state: serde_yaml::Value = serde_yaml::from_str(&state_content).unwrap();
-    let objects_after_second_push = state["objects"]
-        .as_mapping()
-        .map(|m| m.len())
-        .unwrap_or(0);
+    let objects_after_second_push = state["objects"].as_mapping().map(|m| m.len()).unwrap_or(0);
 
     eprintln!("\nObjects after second push: {}", objects_after_second_push);
     eprintln!("State after second push:\n{}", state_content);
@@ -338,7 +335,10 @@ fn test_object_deduplication_across_pushes() {
         }
 
         // Check for duplicate git SHAs (shouldn't happen)
-        let unique_count = git_shas.iter().collect::<std::collections::HashSet<_>>().len();
+        let unique_count = git_shas
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len();
         assert_eq!(
             unique_count,
             git_shas.len(),
@@ -357,7 +357,10 @@ fn test_object_deduplication_across_pushes() {
         }
 
         // Count duplicate content IDs (this is fine - same content, different git objects)
-        let unique_content_ids = content_ids.iter().collect::<std::collections::HashSet<_>>().len();
+        let unique_content_ids = content_ids
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len();
         eprintln!("\nUnique content IDs: {}", unique_content_ids);
         eprintln!("Total git SHAs: {}", git_shas.len());
     }
@@ -388,7 +391,11 @@ fn test_many_objects_then_small_push() {
 
     // Create a bunch of commits (simulating "a repo with many objects")
     for i in 0..10 {
-        std::fs::write(test_repo.join(format!("file{}.txt", i)), format!("content {}\n", i)).unwrap();
+        std::fs::write(
+            test_repo.join(format!("file{}.txt", i)),
+            format!("content {}\n", i),
+        )
+        .unwrap();
         git(&test_repo, &["add", &format!("file{}.txt", i)]);
         git(&test_repo, &["commit", "-m", &format!("Commit {}", i)]);
     }
@@ -401,12 +408,12 @@ fn test_many_objects_then_small_push() {
     let state_file = storage.join("state.yaml");
     let state_content = std::fs::read_to_string(&state_file).unwrap();
     let state: serde_yaml::Value = serde_yaml::from_str(&state_content).unwrap();
-    let objects_after_initial = state["objects"]
-        .as_mapping()
-        .map(|m| m.len())
-        .unwrap_or(0);
+    let objects_after_initial = state["objects"].as_mapping().map(|m| m.len()).unwrap_or(0);
 
-    eprintln!("Objects after pushing 10 commits: {}", objects_after_initial);
+    eprintln!(
+        "Objects after pushing 10 commits: {}",
+        objects_after_initial
+    );
 
     // Now make a small change - just append to one file
     std::fs::write(test_repo.join("file0.txt"), "content 0\nappended\n").unwrap();
@@ -419,10 +426,7 @@ fn test_many_objects_then_small_push() {
     // Count objects after small push
     let state_content = std::fs::read_to_string(&state_file).unwrap();
     let state: serde_yaml::Value = serde_yaml::from_str(&state_content).unwrap();
-    let objects_after_small_push = state["objects"]
-        .as_mapping()
-        .map(|m| m.len())
-        .unwrap_or(0);
+    let objects_after_small_push = state["objects"].as_mapping().map(|m| m.len()).unwrap_or(0);
 
     eprintln!("Objects after small push: {}", objects_after_small_push);
 
@@ -444,7 +448,10 @@ fn test_many_objects_then_small_push() {
     let state_yaml_size = std::fs::metadata(&state_file).unwrap().len();
     eprintln!("state.yaml file size: {} bytes", state_yaml_size);
     eprintln!("Number of objects: {}", objects_after_small_push);
-    eprintln!("Average bytes per object in state.yaml: {}", state_yaml_size / objects_after_small_push as u64);
+    eprintln!(
+        "Average bytes per object in state.yaml: {}",
+        state_yaml_size / objects_after_small_push as u64
+    );
 
     // Calculate total object content size
     let mut total_content_size = 0u64;
@@ -470,8 +477,11 @@ fn test_many_objects_then_small_push() {
                     let header_overhead = null_pos + 1;
                     eprintln!("Header: {:?}", header);
                     eprintln!("Data size: {} bytes", data_size);
-                    eprintln!("Header overhead: {} bytes ({}%)", header_overhead,
-                              header_overhead * 100 / stored_content.len());
+                    eprintln!(
+                        "Header overhead: {} bytes ({}%)",
+                        header_overhead,
+                        header_overhead * 100 / stored_content.len()
+                    );
 
                     total_content_size += stored_content.len() as u64;
                     total_data_size += data_size as u64;
@@ -483,9 +493,15 @@ fn test_many_objects_then_small_push() {
         eprintln!("\n--- Storage breakdown (sampled from 3 objects) ---");
         eprintln!("Total stored: {} bytes", total_content_size);
         eprintln!("Actual data: {} bytes", total_data_size);
-        eprintln!("Header overhead: {} bytes ({}%)",
-                  total_header_overhead,
-                  if total_content_size > 0 { total_header_overhead * 100 / total_content_size } else { 0 });
+        eprintln!(
+            "Header overhead: {} bytes ({}%)",
+            total_header_overhead,
+            if total_content_size > 0 {
+                total_header_overhead * 100 / total_content_size
+            } else {
+                0
+            }
+        );
 
         eprintln!("\n--- Redundancy analysis ---");
         eprintln!("Git SHA-1 is stored in state.yaml: 40 hex chars");
@@ -513,7 +529,11 @@ fn test_clone_modify_push_cycle() {
     git(&original_repo, &["config", "user.email", "test@test.com"]);
 
     for i in 0..10 {
-        std::fs::write(original_repo.join(format!("file{}.txt", i)), format!("content {}\n", i)).unwrap();
+        std::fs::write(
+            original_repo.join(format!("file{}.txt", i)),
+            format!("content {}\n", i),
+        )
+        .unwrap();
         git(&original_repo, &["add", &format!("file{}.txt", i)]);
         git(&original_repo, &["commit", "-m", &format!("Commit {}", i)]);
     }
@@ -529,7 +549,10 @@ fn test_clone_modify_push_cycle() {
     eprintln!("Objects after initial push: {}", objects_after_initial);
 
     // Clone from walrus
-    git(temp.path(), &["clone", &storage_url, cloned_repo.to_str().unwrap()]);
+    git(
+        temp.path(),
+        &["clone", &storage_url, cloned_repo.to_str().unwrap()],
+    );
 
     // Make a small change in cloned repo
     std::fs::write(cloned_repo.join("file0.txt"), "content 0\nmodified\n").unwrap();

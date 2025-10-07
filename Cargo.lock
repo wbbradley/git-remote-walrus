@@ -2588,6 +2588,7 @@ name = "git-remote-walrus"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "clap",
  "dirs 6.0.0",
  "flate2",
  "gix-object",

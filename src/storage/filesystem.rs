@@ -1,10 +1,15 @@
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
+
 use anyhow::Result;
 use sha2::{Digest, Sha256};
-use std::fs;
-use std::path::{Path, PathBuf};
 
-use super::traits::{ContentId, ImmutableStore, MutableState, StorageBackend};
-use super::State;
+use super::{
+    traits::{ContentId, ImmutableStore, MutableState, StorageBackend},
+    State,
+};
 
 /// Filesystem-based storage backend using SHA-256 content addressing
 pub struct FilesystemStorage {
@@ -56,7 +61,10 @@ impl ImmutableStore for FilesystemStorage {
     fn write_objects(&self, contents: &[&[u8]]) -> Result<Vec<ContentId>> {
         // Simple implementation: write sequentially
         // Could be optimized with parallel writes if needed
-        contents.iter().map(|content| self.write_object(content)).collect()
+        contents
+            .iter()
+            .map(|content| self.write_object(content))
+            .collect()
     }
 
     fn read_object(&self, id: &str) -> Result<Vec<u8>> {
@@ -134,8 +142,9 @@ impl StorageBackend for FilesystemStorage {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tempfile::TempDir;
+
+    use super::*;
 
     #[test]
     fn test_write_and_read_object() -> Result<()> {
@@ -173,7 +182,9 @@ mod tests {
         storage.initialize()?;
 
         let mut state = State::default();
-        state.refs.insert("refs/heads/main".to_string(), "abc123".to_string());
+        state
+            .refs
+            .insert("refs/heads/main".to_string(), "abc123".to_string());
 
         storage.write_state(&state)?;
 

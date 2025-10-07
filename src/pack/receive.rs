@@ -1,13 +1,15 @@
 //! Receive pack files during push operations
 
+use std::{
+    io::{Read, Write},
+    process::{Command, Stdio},
+};
+
 use anyhow::{Context, Result};
-use std::io::{Read, Write};
-use std::process::{Command, Stdio};
 use tempfile::TempDir;
 
-use crate::storage::{ContentId, StorageBackend};
-
 use super::objects::{read_loose_object, GitObject, ObjectId};
+use crate::storage::{ContentId, StorageBackend};
 
 /// Receive a packfile from stdin, unpack it, and store objects in the backend
 ///
@@ -61,13 +63,22 @@ pub fn receive_pack<R: Read>(
         .context("Failed to wait for git unpack-objects")?;
 
     if !output.status.success() {
-        eprintln!("git unpack-objects stdout: {}", String::from_utf8_lossy(&output.stdout));
-        eprintln!("git unpack-objects stderr: {}", String::from_utf8_lossy(&output.stderr));
+        eprintln!(
+            "git unpack-objects stdout: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        eprintln!(
+            "git unpack-objects stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         anyhow::bail!("git unpack-objects failed with status: {}", output.status);
     }
 
     // Log the unpack-objects output to stderr
-    eprintln!("git unpack-objects: {}", String::from_utf8_lossy(&output.stderr));
+    eprintln!(
+        "git unpack-objects: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     // Collect all unpacked objects from .git/objects
     let objects = collect_loose_objects(&git_dir)?;
@@ -90,10 +101,8 @@ pub fn receive_pack<R: Read>(
 
 /// Initialize minimal bare repository structure
 fn init_bare_repo(git_dir: &std::path::Path) -> Result<()> {
-    std::fs::create_dir_all(git_dir.join("objects"))
-        .context("Failed to create objects dir")?;
-    std::fs::create_dir_all(git_dir.join("refs"))
-        .context("Failed to create refs dir")?;
+    std::fs::create_dir_all(git_dir.join("objects")).context("Failed to create objects dir")?;
+    std::fs::create_dir_all(git_dir.join("refs")).context("Failed to create refs dir")?;
 
     // Write minimal HEAD
     std::fs::write(git_dir.join("HEAD"), "ref: refs/heads/main\n")
@@ -115,7 +124,10 @@ fn collect_loose_objects(git_dir: &std::path::Path) -> Result<Vec<GitObject>> {
         let path = entry.path();
 
         // Skip pack and info directories
-        if !path.is_dir() || path.file_name().unwrap() == "pack" || path.file_name().unwrap() == "info" {
+        if !path.is_dir()
+            || path.file_name().unwrap() == "pack"
+            || path.file_name().unwrap() == "info"
+        {
             continue;
         }
 
@@ -139,7 +151,11 @@ fn collect_loose_objects(git_dir: &std::path::Path) -> Result<Vec<GitObject>> {
             match read_loose_object(&obj_path) {
                 Ok(obj) => objects.push(obj),
                 Err(e) => {
-                    eprintln!("Warning: Failed to read object {}: {}", obj_path.display(), e);
+                    eprintln!(
+                        "Warning: Failed to read object {}: {}",
+                        obj_path.display(),
+                        e
+                    );
                 }
             }
         }

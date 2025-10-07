@@ -1,8 +1,7 @@
+use std::{io::Write, path::PathBuf, process::Command};
+
 use anyhow::{Context, Result};
 use serde::Deserialize;
-use std::io::Write;
-use std::path::PathBuf;
-use std::process::Command;
 use tempfile::NamedTempFile;
 
 /// Status of a blob on Walrus

@@ -1,10 +1,15 @@
+use std::{
+    io::Write,
+    process::{Command, Stdio},
+};
+
 use anyhow::{Context, Result};
-use std::io::Write;
-use std::process::{Command, Stdio};
 use tempfile::TempDir;
 
-use crate::pack::objects::{write_loose_object, GitObject};
-use crate::storage::StorageBackend;
+use crate::{
+    pack::objects::{write_loose_object, GitObject},
+    storage::StorageBackend,
+};
 
 /// Handle the import command (fetch)
 /// Reconstructs Git repo from pack objects and uses git fast-export
@@ -63,7 +68,10 @@ pub fn handle<S: StorageBackend, W: Write>(
         .context("Failed to wait for git fast-export")?;
 
     if !export_output.status.success() {
-        eprintln!("git fast-export stderr: {}", String::from_utf8_lossy(&export_output.stderr));
+        eprintln!(
+            "git fast-export stderr: {}",
+            String::from_utf8_lossy(&export_output.stderr)
+        );
         anyhow::bail!("git fast-export failed");
     }
 
@@ -79,10 +87,8 @@ pub fn handle<S: StorageBackend, W: Write>(
 
 /// Initialize minimal bare repository structure
 fn init_bare_repo(git_dir: &std::path::Path) -> Result<()> {
-    std::fs::create_dir_all(git_dir.join("objects"))
-        .context("Failed to create objects dir")?;
-    std::fs::create_dir_all(git_dir.join("refs"))
-        .context("Failed to create refs dir")?;
+    std::fs::create_dir_all(git_dir.join("objects")).context("Failed to create objects dir")?;
+    std::fs::create_dir_all(git_dir.join("refs")).context("Failed to create refs dir")?;
 
     std::fs::write(git_dir.join("HEAD"), "ref: refs/heads/main\n")
         .context("Failed to write HEAD")?;

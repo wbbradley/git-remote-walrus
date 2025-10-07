@@ -1,10 +1,10 @@
 //! Handle push command (replaces export)
 
-use anyhow::{Context, Result};
 use std::io::{BufRead, Write};
 
-use crate::pack::receive_pack;
-use crate::storage::StorageBackend;
+use anyhow::{Context, Result};
+
+use crate::{pack::receive_pack, storage::StorageBackend};
 
 /// Handle push command - receive packfile and update refs
 pub fn handle<S: StorageBackend, W: Write, R: BufRead>(
@@ -61,8 +61,7 @@ pub fn handle<S: StorageBackend, W: Write, R: BufRead>(
     // Receive packfile from stdin
     eprintln!("Receiving packfile...");
     let mut stdin = std::io::stdin();
-    let object_mappings = receive_pack(&mut stdin, storage)
-        .context("Failed to receive pack")?;
+    let object_mappings = receive_pack(&mut stdin, storage).context("Failed to receive pack")?;
 
     eprintln!("Stored {} objects", object_mappings.len());
 

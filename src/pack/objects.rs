@@ -1,9 +1,10 @@
 //! Git object handling using gitoxide
 
+use std::io::Read;
+
 use anyhow::{Context, Result};
 use gix_object::Kind;
 use sha1::{Digest, Sha1};
-use std::io::Read;
 
 /// Git object SHA-1 identifier (40 hex characters)
 pub type ObjectId = String;
@@ -32,8 +33,8 @@ impl GitObject {
             .position(|&b| b == 0)
             .context("No null terminator in object header")?;
 
-        let header = std::str::from_utf8(&content[..null_pos])
-            .context("Invalid UTF-8 in object header")?;
+        let header =
+            std::str::from_utf8(&content[..null_pos]).context("Invalid UTF-8 in object header")?;
 
         let parts: Vec<&str> = header.split_whitespace().collect();
         if parts.len() != 2 {
@@ -106,7 +107,10 @@ pub fn read_loose_object(path: &std::path::Path) -> Result<GitObject> {
 }
 
 /// Write a loose object to filesystem path (creates intermediate directories)
-pub fn write_loose_object(obj: &GitObject, base_path: &std::path::Path) -> Result<std::path::PathBuf> {
+pub fn write_loose_object(
+    obj: &GitObject,
+    base_path: &std::path::Path,
+) -> Result<std::path::PathBuf> {
     // Loose objects stored as .git/objects/ab/cdef123...
     let (dir, file) = obj.id.split_at(2);
     let obj_dir = base_path.join(dir);

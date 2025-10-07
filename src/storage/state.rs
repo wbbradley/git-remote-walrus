@@ -1,5 +1,6 @@
-use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+
+use serde::{Deserialize, Serialize};
 
 use super::ContentId;
 
@@ -17,5 +18,5 @@ pub struct State {
     #[serde(default)]
     pub objects: BTreeMap<String, ContentId>, // git_sha1 -> backend_content_id
 
-    // Removed import_marks and export_marks - not needed for pack format
+                                              // Removed import_marks and export_marks - not needed for pack format
 }

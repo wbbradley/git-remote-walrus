@@ -1,15 +1,17 @@
 //! Send pack files during fetch operations
 
+use std::{
+    collections::HashSet,
+    io::Write,
+    path::PathBuf,
+    process::{Command, Stdio},
+};
+
 use anyhow::{Context, Result};
-use std::collections::HashSet;
-use std::io::Write;
-use std::path::PathBuf;
-use std::process::{Command, Stdio};
 use tempfile::TempDir;
 
-use crate::storage::{State, StorageBackend};
-
 use super::objects::{write_loose_object, GitObject, ObjectId};
+use crate::storage::{State, StorageBackend};
 
 /// Send a packfile to stdout for the requested refs
 ///
@@ -99,10 +101,8 @@ fn collect_wanted_objects(wanted_refs: &[String], state: &State) -> Result<Vec<O
 
 /// Initialize minimal bare repository structure
 fn init_bare_repo(git_dir: &std::path::Path) -> Result<()> {
-    std::fs::create_dir_all(git_dir.join("objects"))
-        .context("Failed to create objects dir")?;
-    std::fs::create_dir_all(git_dir.join("refs"))
-        .context("Failed to create refs dir")?;
+    std::fs::create_dir_all(git_dir.join("objects")).context("Failed to create objects dir")?;
+    std::fs::create_dir_all(git_dir.join("refs")).context("Failed to create refs dir")?;
 
     std::fs::write(git_dir.join("HEAD"), "ref: refs/heads/main\n")
         .context("Failed to write HEAD")?;
@@ -145,14 +145,24 @@ fn create_packfile<W: Write>(
         .context("Failed to wait for git pack-objects")?;
 
     if !pack_output.status.success() {
-        eprintln!("git pack-objects stderr: {}", String::from_utf8_lossy(&pack_output.stderr));
-        anyhow::bail!("git pack-objects failed with status: {}", pack_output.status);
+        eprintln!(
+            "git pack-objects stderr: {}",
+            String::from_utf8_lossy(&pack_output.stderr)
+        );
+        anyhow::bail!(
+            "git pack-objects failed with status: {}",
+            pack_output.status
+        );
     }
 
     // Write packfile to output
-    output.write_all(&pack_output.stdout)
+    output
+        .write_all(&pack_output.stdout)
         .context("Failed to write packfile to output")?;
 
-    eprintln!("Packfile created successfully ({} bytes)", pack_output.stdout.len());
+    eprintln!(
+        "Packfile created successfully ({} bytes)",
+        pack_output.stdout.len()
+    );
     Ok(())
 }

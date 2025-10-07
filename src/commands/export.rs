@@ -1,10 +1,11 @@
-use anyhow::{Context, Result};
-use std::io::{BufRead, Write};
-use std::process::Command;
+use std::{
+    io::{BufRead, Write},
+    process::Command,
+};
 
-use crate::git::fast_export;
-use crate::pack::receive_pack;
-use crate::storage::StorageBackend;
+use anyhow::{Context, Result};
+
+use crate::{git::fast_export, pack::receive_pack, storage::StorageBackend};
 
 /// Handle the export command (push)
 /// Uses pack format internally to preserve GPG signatures
@@ -47,7 +48,9 @@ pub fn handle<S: StorageBackend, W: Write, R: BufRead>(
             continue;
         }
 
-        let git_sha1 = String::from_utf8_lossy(&sha_output.stdout).trim().to_string();
+        let git_sha1 = String::from_utf8_lossy(&sha_output.stdout)
+            .trim()
+            .to_string();
         eprintln!("git-remote-walrus: Ref {} points to {}", refname, git_sha1);
 
         // Create a packfile containing all objects for this ref
@@ -68,7 +71,7 @@ pub fn handle<S: StorageBackend, W: Write, R: BufRead>(
         let mut pack_output = Command::new("git")
             .arg("pack-objects")
             .arg("--revs")
-            .arg("--include-tag")  // Include annotated tag objects
+            .arg("--include-tag") // Include annotated tag objects
             .arg("--stdout")
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
@@ -88,14 +91,20 @@ pub fn handle<S: StorageBackend, W: Write, R: BufRead>(
             anyhow::bail!("git pack-objects failed");
         }
 
-        eprintln!("git-remote-walrus: Created packfile of {} bytes", pack_result.stdout.len());
+        eprintln!(
+            "git-remote-walrus: Created packfile of {} bytes",
+            pack_result.stdout.len()
+        );
 
         // Receive and store the packfile
         let mut pack_data = &pack_result.stdout[..];
-        let object_mappings = receive_pack(&mut pack_data, storage)
-            .context("Failed to receive pack")?;
+        let object_mappings =
+            receive_pack(&mut pack_data, storage).context("Failed to receive pack")?;
 
-        eprintln!("git-remote-walrus: Stored {} objects", object_mappings.len());
+        eprintln!(
+            "git-remote-walrus: Stored {} objects",
+            object_mappings.len()
+        );
 
         // Update state with new objects and ref
         storage.update_state(|state| {

@@ -1,13 +1,19 @@
+use std::{collections::BTreeMap, path::PathBuf};
+
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
-use std::path::PathBuf;
 
-use super::traits::{ContentId, ImmutableStore, MutableState, StorageBackend};
-use super::{CacheIndex, FilesystemStorage, State};
-use crate::config::WalrusRemoteConfig;
-use crate::sui::SuiClient;
-use crate::walrus::{BlobTracker, WalrusClient};
+use super::{
+    traits::{ContentId, ImmutableStore, MutableState, StorageBackend},
+    CacheIndex,
+    FilesystemStorage,
+    State,
+};
+use crate::{
+    config::WalrusRemoteConfig,
+    sui::SuiClient,
+    walrus::{BlobTracker, WalrusClient},
+};
 
 /// Storage backend using Walrus for immutable objects and Sui for mutable state
 ///

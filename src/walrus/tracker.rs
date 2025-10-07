@@ -1,8 +1,11 @@
+use std::{
+    collections::BTreeMap,
+    fs,
+    path::{Path, PathBuf},
+};
+
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
-use std::fs;
-use std::path::{Path, PathBuf};
 
 /// Information about a tracked blob
 #[derive(Debug, Clone, Serialize, Deserialize)]

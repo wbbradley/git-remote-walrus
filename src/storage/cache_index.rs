@@ -1,8 +1,7 @@
+use std::{collections::BTreeMap, fs, path::Path};
+
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
-use std::path::Path;
-use std::fs;
 
 /// Dual index for cache lookups
 /// Maps blob_id <-> sha256 bidirectionally
@@ -47,8 +46,7 @@ impl CacheIndex {
                 .with_context(|| format!("Failed to create directory {:?}", parent))?;
         }
 
-        let content = serde_yaml::to_string(self)
-            .context("Failed to serialize cache index")?;
+        let content = serde_yaml::to_string(self).context("Failed to serialize cache index")?;
 
         fs::write(path, content)
             .with_context(|| format!("Failed to write cache index to {:?}", path))?;
@@ -133,8 +131,9 @@ impl CacheIndex {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tempfile::tempdir;
+
+    use super::*;
 
     #[test]
     fn test_insert_and_lookup() {

@@ -1,8 +1,8 @@
-use anyhow::Result;
 use std::io::{self, BufRead, Write};
 
-use crate::commands;
-use crate::storage::StorageBackend;
+use anyhow::Result;
+
+use crate::{commands, storage::StorageBackend};
 
 /// Main protocol handler - reads commands from stdin and dispatches them
 pub fn handle_commands<S: StorageBackend>(storage: S) -> Result<()> {

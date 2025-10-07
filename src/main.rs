@@ -1,7 +1,8 @@
 #![deny(clippy::mod_module_files)]
-use anyhow::{Context, Result};
-use std::env;
 use std::path::PathBuf;
+
+use anyhow::{Context, Result};
+use clap::{Parser, Subcommand};
 
 mod commands;
 mod config;
@@ -14,6 +15,39 @@ mod sui;
 mod walrus;
 
 use storage::{FilesystemStorage, StorageBackend, WalrusStorage};
+
+#[derive(Parser)]
+#[command(name = "git-remote-walrus")]
+#[command(about = "Git remote helper for Walrus storage", long_about = None)]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+
+    /// Remote name (passed by git)
+    #[arg(value_name = "REMOTE_NAME", hide = true)]
+    remote_name: Option<String>,
+
+    /// Remote URL (passed by git)
+    #[arg(value_name = "REMOTE_URL", hide = true)]
+    remote_url: Option<String>,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Deploy the Move package to Sui
+    Deploy,
+    /// Initialize a new remote repository
+    Init {
+        /// Package ID of the deployed Walrus Move package
+        package_id: String,
+        /// Create a shared object (accessible by multiple users)
+        #[arg(long)]
+        shared: bool,
+        /// Add addresses to the allowlist (can be specified multiple times)
+        #[arg(long, value_name = "ADDRESS")]
+        allow: Vec<String>,
+    },
+}
 
 /// Remote storage backend type
 enum RemoteType {
@@ -109,54 +143,46 @@ impl StorageBackend for Storage {
 }
 
 fn main() -> Result<()> {
-    let args: Vec<String> = env::args().collect();
+    let cli = Cli::parse();
 
-    // Check for deploy command: git-remote-walrus deploy
-    if args.len() >= 2 && args[1] == "deploy" {
-        return handle_deploy(&args[2..]);
-    }
+    match cli.command {
+        Some(Command::Deploy) => handle_deploy(),
+        Some(Command::Init {
+            package_id,
+            shared,
+            allow,
+        }) => handle_init(package_id, shared, allow),
+        None => {
+            // Git passes remote name and URL as positional arguments
+            let remote_url = cli
+                .remote_url
+                .ok_or_else(|| anyhow::anyhow!("Missing remote URL"))?;
 
-    // Check for init command: git-remote-walrus init [--shared] [--allow <addr>]...
-    if args.len() >= 2 && args[1] == "init" {
-        return handle_init(&args[2..]);
-    }
+            // Parse the URL - format is walrus::<path or object-id>
+            let remote_type = parse_remote_url(&remote_url)?;
 
-    // Git passes three arguments:
-    // 1. Binary path
-    // 2. Remote name (e.g., "storage")
-    // 3. Remote URL (e.g., "walrus::/tmp/storage" or "walrus::0x123...")
-    if args.len() < 3 {
-        anyhow::bail!(
-            "Usage: git-remote-walrus <remote-name> <remote-url>\n       git-remote-walrus deploy\n       git-remote-walrus init <package-id> [--shared] [--allow <address>]..."
-        );
-    }
+            // Initialize storage backend based on type
+            let storage = match remote_type {
+                RemoteType::Filesystem(path) => {
+                    eprintln!("git-remote-walrus: Using filesystem storage: {:?}", path);
+                    let fs_storage = FilesystemStorage::new(path)?;
+                    Storage::Filesystem(fs_storage)
+                }
+                RemoteType::Sui(object_id) => {
+                    eprintln!("git-remote-walrus: Using Walrus+Sui storage: {}", object_id);
+                    let walrus_storage = WalrusStorage::new(object_id)?;
+                    Storage::Walrus(Box::new(walrus_storage))
+                }
+            };
 
-    let _remote_name = &args[1];
-    let remote_url = &args[2];
+            storage.initialize()?;
 
-    // Parse the URL - format is walrus::<path or object-id>
-    let remote_type = parse_remote_url(remote_url)?;
+            // Start protocol handler
+            protocol::handle_commands(storage)?;
 
-    // Initialize storage backend based on type
-    let storage = match remote_type {
-        RemoteType::Filesystem(path) => {
-            eprintln!("git-remote-walrus: Using filesystem storage: {:?}", path);
-            let fs_storage = FilesystemStorage::new(path)?;
-            Storage::Filesystem(fs_storage)
+            Ok(())
         }
-        RemoteType::Sui(object_id) => {
-            eprintln!("git-remote-walrus: Using Walrus+Sui storage: {}", object_id);
-            let walrus_storage = WalrusStorage::new(object_id)?;
-            Storage::Walrus(Box::new(walrus_storage))
-        }
-    };
-
-    storage.initialize()?;
-
-    // Start protocol handler
-    protocol::handle_commands(storage)?;
-
-    Ok(())
+    }
 }
 
 fn parse_remote_url(url: &str) -> Result<RemoteType> {
@@ -182,7 +208,7 @@ fn parse_remote_url(url: &str) -> Result<RemoteType> {
     Ok(RemoteType::Filesystem(PathBuf::from(path_str)))
 }
 
-fn handle_deploy(_args: &[String]) -> Result<()> {
+fn handle_deploy() -> Result<()> {
     eprintln!("git-remote-walrus: Deploying Move package to Sui...\n");
 
     // Load configuration
@@ -192,7 +218,7 @@ fn handle_deploy(_args: &[String]) -> Result<()> {
     eprintln!("  Wallet: {:?}\n", config.sui_wallet_path);
 
     // Get the move package directory
-    let move_package_dir = env::current_dir()?.join("move").join("walrus_remote");
+    let move_package_dir = std::env::current_dir()?.join("move").join("walrus_remote");
 
     if !move_package_dir.exists() {
         anyhow::bail!(
@@ -276,40 +302,7 @@ fn handle_deploy(_args: &[String]) -> Result<()> {
     Ok(())
 }
 
-fn handle_init(args: &[String]) -> Result<()> {
-    // First argument should be package ID
-    if args.is_empty() || args[0] == "--help" || args[0] == "-h" {
-        anyhow::bail!(
-            "Usage: git-remote-walrus init <package-id> [--shared] [--allow <address>]..."
-        );
-    }
-
-    let package_id = args[0].clone();
-
-    // Parse remaining args for --shared and --allow flags
-    let mut shared = false;
-    let mut allowlist = Vec::new();
-    let mut i = 1;
-
-    while i < args.len() {
-        match args[i].as_str() {
-            "--shared" => {
-                shared = true;
-                i += 1;
-            }
-            "--allow" => {
-                if i + 1 >= args.len() {
-                    anyhow::bail!("--allow requires an address argument");
-                }
-                allowlist.push(args[i + 1].clone());
-                i += 2;
-            }
-            other => {
-                anyhow::bail!("Unknown argument: {}", other);
-            }
-        }
-    }
-
+fn handle_init(package_id: String, shared: bool, allowlist: Vec<String>) -> Result<()> {
     eprintln!("git-remote-walrus: Creating new remote...");
     eprintln!("  Package ID: {}", package_id);
     eprintln!("  Shared: {}", shared);
