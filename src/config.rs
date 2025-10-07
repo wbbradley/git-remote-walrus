@@ -54,8 +54,6 @@ impl WalrusRemoteConfig {
                 .parse()
                 .context("Failed to parse WALRUS_EXPIRATION_WARNING_THRESHOLD as u64")?;
         }
-
-        eprintln!("Using Walrus config: {:?}", config);
         Ok(config)
     }
 

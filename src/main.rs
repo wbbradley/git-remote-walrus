@@ -47,6 +47,12 @@ enum Command {
         #[arg(long, value_name = "ADDRESS")]
         allow: Vec<String>,
     },
+    /// Display or edit configuration
+    Config {
+        /// Open configuration file in $EDITOR
+        #[arg(short, long)]
+        edit: bool,
+    },
 }
 
 /// Remote storage backend type
@@ -152,6 +158,7 @@ fn main() -> Result<()> {
             shared,
             allow,
         }) => handle_init(package_id, shared, allow),
+        Some(Command::Config { edit }) => handle_config(edit),
         None => {
             // Git passes remote name and URL as positional arguments
             let remote_url = cli
@@ -345,4 +352,77 @@ fn handle_init(package_id: String, shared: bool, allowlist: Vec<String>) -> Resu
 
         Ok(())
     })
+}
+
+fn handle_config(edit: bool) -> Result<()> {
+    let config_path = config::WalrusRemoteConfig::config_file_path()?;
+
+    if edit {
+        // Open config file in $EDITOR
+        let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".to_string());
+
+        eprintln!("Opening config file in {}: {:?}", editor, config_path);
+
+        let status = std::process::Command::new(&editor)
+            .arg(&config_path)
+            .status()
+            .with_context(|| format!("Failed to execute editor: {}", editor))?;
+
+        if !status.success() {
+            anyhow::bail!("Editor exited with non-zero status");
+        }
+
+        Ok(())
+    } else {
+        // Display current configuration
+        eprintln!("Configuration file: {:?}\n", config_path);
+
+        if !config_path.exists() {
+            eprintln!("Config file does not exist yet.");
+            eprintln!(
+                "\nCreate a config file at {:?} with contents like:\n",
+                config_path
+            );
+            eprintln!("sui_wallet_path: /path/to/.sui/sui_config/client.yaml");
+            eprintln!("walrus_config_path: /path/to/.config/walrus/client.yaml");
+            eprintln!("cache_dir: /path/to/.cache/git-remote-walrus");
+            eprintln!("default_epochs: 5");
+            eprintln!("expiration_warning_threshold: 10");
+            return Ok(());
+        }
+
+        // Load and display config
+        let config = config::WalrusRemoteConfig::load()?;
+
+        println!("Current configuration:");
+        println!("  sui_wallet_path: {:?}", config.sui_wallet_path);
+        println!("  walrus_config_path: {:?}", config.walrus_config_path);
+        println!("  cache_dir: {:?}", config.cache_dir);
+        println!("  default_epochs: {}", config.default_epochs);
+        println!(
+            "  expiration_warning_threshold: {}",
+            config.expiration_warning_threshold
+        );
+
+        println!("\nEnvironment variable overrides:");
+        println!("  SUI_WALLET: {:?}", std::env::var("SUI_WALLET").ok());
+        println!(
+            "  WALRUS_CONFIG: {:?}",
+            std::env::var("WALRUS_CONFIG").ok()
+        );
+        println!(
+            "  WALRUS_REMOTE_CACHE_DIR: {:?}",
+            std::env::var("WALRUS_REMOTE_CACHE_DIR").ok()
+        );
+        println!(
+            "  WALRUS_REMOTE_BLOB_EPOCHS: {:?}",
+            std::env::var("WALRUS_REMOTE_BLOB_EPOCHS").ok()
+        );
+        println!(
+            "  WALRUS_EXPIRATION_WARNING_THRESHOLD: {:?}",
+            std::env::var("WALRUS_EXPIRATION_WARNING_THRESHOLD").ok()
+        );
+
+        Ok(())
+    }
 }
