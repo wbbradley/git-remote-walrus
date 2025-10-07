@@ -1,5 +1,5 @@
 #![deny(clippy::mod_module_files)]
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::env;
 use std::path::PathBuf;
 
@@ -111,6 +111,11 @@ impl StorageBackend for Storage {
 fn main() -> Result<()> {
     let args: Vec<String> = env::args().collect();
 
+    // Check for deploy command: git-remote-walrus deploy
+    if args.len() >= 2 && args[1] == "deploy" {
+        return handle_deploy(&args[2..]);
+    }
+
     // Check for init command: git-remote-walrus init [--shared] [--allow <addr>]...
     if args.len() >= 2 && args[1] == "init" {
         return handle_init(&args[2..]);
@@ -122,7 +127,7 @@ fn main() -> Result<()> {
     // 3. Remote URL (e.g., "walrus::/tmp/storage" or "walrus::0x123...")
     if args.len() < 3 {
         anyhow::bail!(
-            "Usage: git-remote-walrus <remote-name> <remote-url>\n       git-remote-walrus init [--shared] [--allow <address>]..."
+            "Usage: git-remote-walrus <remote-name> <remote-url>\n       git-remote-walrus deploy\n       git-remote-walrus init <package-id> [--shared] [--allow <address>]..."
         );
     }
 
@@ -177,12 +182,114 @@ fn parse_remote_url(url: &str) -> Result<RemoteType> {
     Ok(RemoteType::Filesystem(PathBuf::from(path_str)))
 }
 
+fn handle_deploy(_args: &[String]) -> Result<()> {
+    eprintln!("git-remote-walrus: Deploying Move package to Sui...\n");
+
+    // Load configuration
+    let config = config::WalrusRemoteConfig::load()?;
+
+    eprintln!("Configuration:");
+    eprintln!("  Wallet: {:?}\n", config.sui_wallet_path);
+
+    // Get the move package directory
+    let move_package_dir = env::current_dir()?.join("move").join("walrus_remote");
+
+    if !move_package_dir.exists() {
+        anyhow::bail!(
+            "Move package directory not found: {:?}\n\
+             Please run this command from the git-remote-walrus repository root.",
+            move_package_dir
+        );
+    }
+
+    // Step 1: Build the Move package
+    eprintln!("Step 1/2: Building Move package...");
+    let build_output = std::process::Command::new("sui")
+        .arg("move")
+        .arg("build")
+        .current_dir(&move_package_dir)
+        .output()
+        .context("Failed to execute 'sui move build'")?;
+
+    if !build_output.status.success() {
+        let stderr = String::from_utf8_lossy(&build_output.stderr);
+        anyhow::bail!("Move build failed:\n{}", stderr);
+    }
+
+    eprintln!("✓ Move package built successfully\n");
+
+    // Step 2: Publish the package
+    eprintln!("Step 2/2: Publishing to Sui...");
+    let publish_output = std::process::Command::new("sui")
+        .arg("client")
+        .arg("--client.config")
+        .arg(&config.sui_wallet_path)
+        .arg("publish")
+        .arg("--json")
+        .arg("--gas-budget")
+        .arg("500000000") // 0.5 SUI
+        .current_dir(&move_package_dir)
+        .output()
+        .context("Failed to execute 'sui client publish'")?;
+
+    if !publish_output.status.success() {
+        let stderr = String::from_utf8_lossy(&publish_output.stderr);
+        anyhow::bail!("Publish failed:\n{}", stderr);
+    }
+
+    // Parse JSON output to extract package ID
+    let stdout = String::from_utf8_lossy(&publish_output.stdout);
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout).context("Failed to parse publish output as JSON")?;
+
+    // Extract package ID from objectChanges
+    let mut package_id: Option<String> = None;
+    if let Some(object_changes) = json.get("objectChanges").and_then(|v| v.as_array()) {
+        for change in object_changes {
+            if let Some(change_type) = change.get("type").and_then(|v| v.as_str()) {
+                if change_type == "published" {
+                    if let Some(pkg_id) = change.get("packageId").and_then(|v| v.as_str()) {
+                        package_id = Some(pkg_id.to_string());
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    let package_id = package_id
+        .ok_or_else(|| anyhow::anyhow!("Failed to extract package ID from publish output"))?;
+
+    eprintln!("✓ Package published successfully\n");
+    eprintln!("Package ID: {}\n", package_id);
+
+    // Print next steps
+    eprintln!("Next steps:");
+    eprintln!("  1. Create a remote:");
+    eprintln!("       git-remote-walrus init {}", package_id);
+    eprintln!("     Or for a shared remote:");
+    eprintln!(
+        "       git-remote-walrus init {} --shared --allow <address>",
+        package_id
+    );
+
+    Ok(())
+}
+
 fn handle_init(args: &[String]) -> Result<()> {
-    // TODO: Implement Sui object creation
-    // Parse args for --shared and --allow flags
+    // First argument should be package ID
+    if args.is_empty() || args[0] == "--help" || args[0] == "-h" {
+        anyhow::bail!(
+            "Usage: git-remote-walrus init <package-id> [--shared] [--allow <address>]..."
+        );
+    }
+
+    let package_id = args[0].clone();
+
+    // Parse remaining args for --shared and --allow flags
     let mut shared = false;
     let mut allowlist = Vec::new();
-    let mut i = 0;
+    let mut i = 1;
 
     while i < args.len() {
         match args[i].as_str() {
@@ -204,11 +311,45 @@ fn handle_init(args: &[String]) -> Result<()> {
     }
 
     eprintln!("git-remote-walrus: Creating new remote...");
+    eprintln!("  Package ID: {}", package_id);
     eprintln!("  Shared: {}", shared);
     if !allowlist.is_empty() {
         eprintln!("  Allowlist: {:?}", allowlist);
     }
 
-    // TODO: Call Sui SDK to create RemoteState object
-    anyhow::bail!("Init command not yet implemented. This will create a RemoteState object on Sui.");
+    // Load configuration for RPC URL and wallet path
+    let config = config::WalrusRemoteConfig::load()?;
+
+    eprintln!("  Wallet: {:?}", config.sui_wallet_path);
+
+    // Create async runtime for Sui operations
+    let runtime = tokio::runtime::Runtime::new()?;
+
+    runtime.block_on(async {
+        // Create Sui client
+        eprintln!("\nInitializing Sui client...");
+        let sui_client = sui::SuiClient::new_for_init(package_id, config.sui_wallet_path).await?;
+
+        // Create RemoteState object
+        eprintln!("Creating RemoteState object...");
+        let object_id = sui_client.create_remote().await?;
+        eprintln!("✓ RemoteState created: {}", object_id);
+
+        // Share if requested
+        if shared {
+            eprintln!("\nConverting to shared object...");
+            sui_client
+                .share_remote(object_id.clone(), allowlist)
+                .await?;
+            eprintln!("✓ RemoteState is now shared");
+        }
+
+        // Print instructions
+        eprintln!("\n✓ Success! Your git remote is ready.");
+        eprintln!("\nTo use this remote:");
+        eprintln!("  git remote add storage walrus::{}", object_id);
+        eprintln!("  git push storage main");
+
+        Ok(())
+    })
 }

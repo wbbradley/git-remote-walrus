@@ -3,8 +3,8 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use shared_crypto::intent::Intent;
-use sui_config::{sui_config_dir, PersistedConfig, SUI_CLIENT_CONFIG, SUI_KEYSTORE_FILENAME};
-use sui_keys::keystore::{AccountKeystore, FileBasedKeystore, Keystore};
+use sui_config::PersistedConfig;
+use sui_keys::keystore::AccountKeystore;
 use sui_sdk::{
     rpc_types::{
         SuiMoveStruct, SuiMoveValue, SuiObjectDataOptions, SuiParsedData,
@@ -35,7 +35,8 @@ pub struct SuiClient {
     client: sui_sdk::SuiClient,
 
     /// RemoteState object ID
-    state_object_id: ObjectID,
+    /// Might not yet be initialized if we are in the `init` command.
+    state_object_id: Option<ObjectID>,
 
     /// Package ID where RemoteState module is published
     package_id: ObjectID,
@@ -51,24 +52,20 @@ impl SuiClient {
     /// Create a new Sui client
     ///
     /// Loads the keystore and active address from Sui client config.
-    pub async fn new(
-        state_object_id: String,
-        rpc_url: String,
-        wallet_path: PathBuf,
-    ) -> Result<Self> {
+    pub async fn new(state_object_id: String, wallet_path: PathBuf) -> Result<Self> {
         // Parse state object ID
         let state_object_id = ObjectID::from_hex_literal(&state_object_id)
             .with_context(|| format!("Invalid state object ID: {}", state_object_id))?;
 
-        // Build Sui client
-        let client = SuiClientBuilder::default()
-            .build(rpc_url)
-            .await
-            .context("Failed to build Sui client")?;
-
         // Load Sui client config to get active address
         let sui_client_config: SuiClientConfig = PersistedConfig::read(&wallet_path)
             .with_context(|| format!("Failed to load Sui config from {:?}", wallet_path))?;
+
+        // Build Sui client
+        let client = SuiClientBuilder::default()
+            .build(sui_client_config.get_active_env()?.rpc.clone())
+            .await
+            .context("Failed to build Sui client")?;
 
         // Get active address from config
         let active_address = sui_client_config
@@ -91,11 +88,123 @@ impl SuiClient {
 
         Ok(Self {
             client,
-            state_object_id,
+            state_object_id: Some(state_object_id),
             package_id,
             sender: active_address,
             sui_client_config,
         })
+    }
+
+    /// Create a new Sui client for init command (without state object ID)
+    pub async fn new_for_init(package_id: String, wallet_path: PathBuf) -> Result<Self> {
+        // Parse package ID
+        let package_id = ObjectID::from_hex_literal(&package_id)
+            .with_context(|| format!("Invalid package ID: {}", package_id))?;
+
+        // Load Sui client config to get active address
+        let sui_client_config: SuiClientConfig = PersistedConfig::read(&wallet_path)
+            .with_context(|| format!("Failed to load Sui config from {:?}", wallet_path))?;
+
+        // Build Sui client
+        let client = SuiClientBuilder::default()
+            .build(sui_client_config.get_active_env()?.rpc.clone())
+            .await
+            .context("Failed to build Sui client")?;
+
+        // Get active address from config
+        let active_address = sui_client_config
+            .active_address
+            .ok_or_else(|| anyhow::anyhow!("No active address found in Sui config"))?;
+
+        // Verify the active address exists in the keystore
+        if !sui_client_config
+            .keystore
+            .addresses()
+            .contains(&active_address)
+        {
+            anyhow::bail!("Active address {} not found in keystore", active_address,);
+        }
+
+        Ok(Self {
+            client,
+            state_object_id: None,
+            package_id,
+            sender: active_address,
+            sui_client_config,
+        })
+    }
+
+    /// Create a new RemoteState object and return its ID
+    pub async fn create_remote(&self) -> Result<String> {
+        let mut ptb = ProgrammableTransactionBuilder::new();
+
+        // Call create_remote() which transfers the object to sender
+        ptb.programmable_move_call(
+            self.package_id,
+            Identifier::new("remote_state")?,
+            Identifier::new("create_remote")?,
+            vec![], // no type arguments
+            vec![], // no arguments (uses TxContext)
+        );
+
+        // Execute and get created object ID
+        let object_id = self
+            .execute_ptb_and_get_created_object(ptb, DEFAULT_GAS_BUDGET)
+            .await?;
+
+        Ok(object_id.to_hex_literal())
+    }
+
+    /// Share a RemoteState object with an allowlist
+    pub async fn share_remote(&self, object_id: String, allowlist: Vec<String>) -> Result<()> {
+        // Parse object ID
+        let object_id = ObjectID::from_hex_literal(&object_id)
+            .with_context(|| format!("Invalid object ID: {}", object_id))?;
+
+        // Parse allowlist addresses
+        let mut allowlist_addrs = Vec::new();
+        for addr_str in allowlist {
+            let addr: SuiAddress = addr_str
+                .parse()
+                .with_context(|| format!("Invalid address: {}", addr_str))?;
+            allowlist_addrs.push(addr);
+        }
+
+        let mut ptb = ProgrammableTransactionBuilder::new();
+
+        // Get object reference (it's owned by sender)
+        let object = self
+            .client
+            .read_api()
+            .get_object_with_options(object_id, SuiObjectDataOptions::new().with_owner())
+            .await
+            .context("Failed to fetch RemoteState object")?;
+
+        let data = object
+            .data
+            .ok_or_else(|| anyhow::anyhow!("RemoteState object not found"))?;
+
+        let object_ref = data.object_ref();
+
+        // Add object as input (receiving by value)
+        let state_arg = ptb.obj(ObjectArg::ImmOrOwnedObject(object_ref))?;
+
+        // Create vector of addresses for allowlist
+        let allowlist_arg = ptb.pure(allowlist_addrs)?;
+
+        // Call share_with_allowlist(state, allowlist)
+        ptb.programmable_move_call(
+            self.package_id,
+            Identifier::new("remote_state")?,
+            Identifier::new("share_with_allowlist")?,
+            vec![], // no type arguments
+            vec![state_arg, allowlist_arg],
+        );
+
+        // Execute transaction
+        self.execute_ptb(ptb, DEFAULT_GAS_BUDGET).await?;
+
+        Ok(())
     }
 
     /// Extract package ID from RemoteState object type
@@ -130,13 +239,13 @@ impl SuiClient {
 
     /// Get the object reference for the RemoteState
     async fn get_state_object_ref(&self) -> Result<ObjectRef> {
+        let state_object_id = self.state_object_id.ok_or_else(|| {
+            anyhow::anyhow!("State object ID is not set - cannot get state object reference")
+        })?;
         let object = self
             .client
             .read_api()
-            .get_object_with_options(
-                self.state_object_id,
-                SuiObjectDataOptions::new().with_owner(),
-            )
+            .get_object_with_options(state_object_id, SuiObjectDataOptions::new().with_owner())
             .await
             .context("Failed to fetch RemoteState object")?;
 
@@ -168,12 +277,15 @@ impl SuiClient {
 
     /// Read all refs from on-chain state
     pub async fn read_refs(&self) -> Result<BTreeMap<String, String>> {
+        let state_object_id = self.state_object_id.ok_or_else(|| {
+            anyhow::anyhow!("State object ID is not set - cannot get state object reference")
+        })?;
         // Get the RemoteState object
         let remote_state = self
             .client
             .read_api()
             .get_object_with_options(
-                self.state_object_id,
+                state_object_id,
                 SuiObjectDataOptions::new().with_content().with_bcs(),
             )
             .await
@@ -238,12 +350,15 @@ impl SuiClient {
 
     /// Get objects blob ID from on-chain state
     pub async fn get_objects_blob_id(&self) -> Result<Option<String>> {
+        let state_object_id = self.state_object_id.ok_or_else(|| {
+            anyhow::anyhow!("State object ID is not set - cannot get state object reference")
+        })?;
         // Get the RemoteState object with content
         let remote_state = self
             .client
             .read_api()
             .get_object_with_options(
-                self.state_object_id,
+                state_object_id,
                 SuiObjectDataOptions::new().with_content().with_bcs(),
             )
             .await
@@ -498,13 +613,13 @@ impl SuiClient {
 
     /// Check if a lock is currently held on the RemoteState
     async fn check_lock_acquired(&self) -> Result<bool> {
+        let state_object_id = self.state_object_id.ok_or_else(|| {
+            anyhow::anyhow!("State object ID is not set - cannot get state object reference")
+        })?;
         let object = self
             .client
             .read_api()
-            .get_object_with_options(
-                self.state_object_id,
-                SuiObjectDataOptions::new().with_content(),
-            )
+            .get_object_with_options(state_object_id, SuiObjectDataOptions::new().with_content())
             .await
             .context("Failed to fetch RemoteState object")?;
 
@@ -744,6 +859,123 @@ impl SuiClient {
         );
 
         Ok(())
+    }
+
+    /// Execute a PTB and return the first created object ID
+    async fn execute_ptb_and_get_created_object(
+        &self,
+        ptb: ProgrammableTransactionBuilder,
+        gas_budget: u64,
+    ) -> Result<ObjectID> {
+        // 1. Select enough gas coins to cover the budget
+        let coins = self
+            .client
+            .coin_read_api()
+            .get_coins(self.sender, None, None, Some(500))
+            .await
+            .context("Failed to fetch gas coins")?;
+
+        // Collect coins until we have enough balance
+        let mut gas_coins = Vec::new();
+        let mut total_balance = 0u64;
+
+        for coin in coins.data {
+            total_balance += coin.balance;
+            gas_coins.push(coin);
+
+            if total_balance >= gas_budget {
+                break;
+            }
+        }
+
+        if total_balance < gas_budget {
+            anyhow::bail!(
+                "Insufficient gas: need {} MIST, but only have {} MIST available",
+                gas_budget,
+                total_balance
+            );
+        }
+
+        if gas_coins.is_empty() {
+            anyhow::bail!("No gas coins available for sender");
+        }
+
+        // 2. Get current gas price
+        let gas_price = self
+            .client
+            .read_api()
+            .get_reference_gas_price()
+            .await
+            .context("Failed to get reference gas price")?;
+
+        // 3. Build TransactionData with all selected gas coins
+        let pt = ptb.finish();
+        let gas_coin_refs: Vec<_> = gas_coins.iter().map(|c| c.object_ref()).collect();
+        let tx_data = TransactionData::new_programmable(
+            self.sender,
+            gas_coin_refs,
+            pt,
+            gas_budget,
+            gas_price,
+        );
+
+        // 4. Sign transaction with keystore
+        eprintln!("  Signing transaction with address: {}", self.sender);
+        let signature: Signature = self
+            .sui_client_config
+            .keystore
+            .sign_secure(&self.sender, &tx_data, Intent::sui_transaction())
+            .await
+            .context("Failed to sign transaction")?;
+
+        // 5. Create signed transaction
+        let transaction = Transaction::from_data(tx_data, vec![signature]);
+
+        // 6. Execute transaction
+        let response = self
+            .client
+            .quorum_driver_api()
+            .execute_transaction_block(
+                transaction,
+                SuiTransactionBlockResponseOptions::default()
+                    .with_effects()
+                    .with_object_changes(),
+                Some(ExecuteTransactionRequestType::WaitForLocalExecution),
+            )
+            .await
+            .context("Failed to execute transaction")?;
+
+        // 7. Check for errors in transaction execution
+        if let Some(effects) = &response.effects {
+            if effects.status().is_err() {
+                anyhow::bail!("Transaction execution failed: {:?}", effects.status());
+            }
+        }
+
+        // 8. Extract created object ID from object changes
+        let object_changes = response
+            .object_changes
+            .ok_or_else(|| anyhow::anyhow!("No object changes in response"))?;
+
+        for change in object_changes {
+            if let sui_sdk::rpc_types::ObjectChange::Created {
+                object_id,
+                object_type,
+                ..
+            } = change
+            {
+                // Check if this is a RemoteState object
+                if object_type
+                    .to_string()
+                    .contains("remote_state::RemoteState")
+                {
+                    eprintln!("sui: RemoteState created: {}", object_id.to_hex_literal());
+                    return Ok(object_id);
+                }
+            }
+        }
+
+        anyhow::bail!("No RemoteState object was created in transaction")
     }
 }
 

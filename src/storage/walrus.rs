@@ -46,17 +46,20 @@ impl WalrusStorage {
     /// Create a new WalrusStorage instance
     pub fn new(state_object_id: String) -> Result<Self> {
         // Load configuration
-        let config = WalrusRemoteConfig::load().context("Failed to load configuration")?;
+        let walrus_remote_config =
+            WalrusRemoteConfig::load().context("Failed to load configuration")?;
 
         // Ensure cache directory exists
-        let cache_dir = config.ensure_cache_dir()?;
+        let cache_dir = walrus_remote_config.ensure_cache_dir()?;
 
         // Create cache storage
         let cache = FilesystemStorage::new(&cache_dir).context("Failed to create cache storage")?;
 
         // Create Walrus client
-        let walrus_client =
-            WalrusClient::new(config.walrus_config_path.clone(), config.default_epochs);
+        let walrus_client = WalrusClient::new(
+            walrus_remote_config.walrus_config_path.clone(),
+            walrus_remote_config.default_epochs,
+        );
 
         // Create tokio runtime for async operations
         let runtime = tokio::runtime::Runtime::new().context("Failed to create tokio runtime")?;
@@ -64,8 +67,7 @@ impl WalrusStorage {
         // Create Sui client (need to block on async constructor)
         let sui_client = runtime.block_on(SuiClient::new(
             state_object_id.clone(),
-            config.sui_rpc_url.clone(),
-            config.sui_wallet_path.clone(),
+            walrus_remote_config.sui_wallet_path.clone(),
         ))?;
 
         // Set up paths
@@ -73,7 +75,7 @@ impl WalrusStorage {
         let blob_tracker_path = cache_dir.join("blob_tracker.yaml");
 
         Ok(Self {
-            config,
+            config: walrus_remote_config,
             state_object_id,
             cache,
             walrus_client,
@@ -436,7 +438,7 @@ impl StorageBackend for WalrusStorage {
         eprintln!("git-remote-walrus: Initializing Walrus storage");
         eprintln!("  State object: {}", self.state_object_id);
         eprintln!("  Cache dir: {:?}", self.config.cache_dir);
-        eprintln!("  Sui RPC: {}", self.config.sui_rpc_url);
+        eprintln!("  Wallet: {:?}", self.config.sui_wallet_path);
 
         // Initialize cache
         self.cache

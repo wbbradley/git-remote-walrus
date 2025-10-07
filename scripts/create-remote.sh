@@ -80,18 +80,14 @@ if [ "$SHARED" = true ]; then
     echo "Converting to shared object..."
 
     # Build allowlist argument
-    ALLOWLIST_ARG=""
-    for addr in "${ALLOWLIST[@]}"; do
-        ALLOWLIST_ARG="$ALLOWLIST_ARG --args $addr"
-    done
+    allowlist_args=( --args "$OBJECT_ID" "[${ALLOWLIST[*]}]" )
 
     # Call share_with_allowlist
     sui client call \
         --package "$PACKAGE_ID" \
         --module remote_state \
         --function share_with_allowlist \
-        --args "$OBJECT_ID" \
-        $ALLOWLIST_ARG \
+        "${allowlist_args[@]}" \
         --gas-budget 10000000
 
     echo "✓ Converted to shared object with allowlist"
