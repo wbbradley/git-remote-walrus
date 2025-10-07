@@ -5,9 +5,7 @@ use sha2::{Digest, Sha256};
 
 use super::{
     traits::{ContentId, ImmutableStore, MutableState, StorageBackend},
-    CacheIndex,
-    FilesystemStorage,
-    State,
+    CacheIndex, FilesystemStorage, State,
 };
 use crate::{
     config::WalrusRemoteConfig,

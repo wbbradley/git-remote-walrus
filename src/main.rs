@@ -221,6 +221,10 @@ fn handle_deploy() -> Result<()> {
     // Load configuration
     let config = config::WalrusRemoteConfig::load()?;
 
+    eprintln!(
+        "Hint: You can run `sui client --client.config {} faucet` to get test SUI if you are on a localnet.",
+        config.sui_wallet_path.display()
+    );
     eprintln!("Configuration:");
     eprintln!("  Wallet: {:?}\n", config.sui_wallet_path);
 
@@ -375,19 +379,19 @@ fn handle_config(edit: bool) -> Result<()> {
         Ok(())
     } else {
         // Display current configuration
-        eprintln!("Configuration file: {:?}\n", config_path);
+        println!("Configuration file: {:?}\n", config_path);
 
         if !config_path.exists() {
-            eprintln!("Config file does not exist yet.");
-            eprintln!(
+            println!("Config file does not exist yet.");
+            println!(
                 "\nCreate a config file at {:?} with contents like:\n",
                 config_path
             );
-            eprintln!("sui_wallet_path: /path/to/.sui/sui_config/client.yaml");
-            eprintln!("walrus_config_path: /path/to/.config/walrus/client.yaml");
-            eprintln!("cache_dir: /path/to/.cache/git-remote-walrus");
-            eprintln!("default_epochs: 5");
-            eprintln!("expiration_warning_threshold: 10");
+            println!("sui_wallet_path: /path/to/.sui/sui_config/client.yaml");
+            println!("walrus_config_path: /path/to/.config/walrus/client.yaml");
+            println!("cache_dir: /path/to/.cache/git-remote-walrus");
+            println!("default_epochs: 5");
+            println!("expiration_warning_threshold: 10");
             return Ok(());
         }
 
@@ -406,10 +410,7 @@ fn handle_config(edit: bool) -> Result<()> {
 
         println!("\nEnvironment variable overrides:");
         println!("  SUI_WALLET: {:?}", std::env::var("SUI_WALLET").ok());
-        println!(
-            "  WALRUS_CONFIG: {:?}",
-            std::env::var("WALRUS_CONFIG").ok()
-        );
+        println!("  WALRUS_CONFIG: {:?}", std::env::var("WALRUS_CONFIG").ok());
         println!(
             "  WALRUS_REMOTE_CACHE_DIR: {:?}",
             std::env::var("WALRUS_REMOTE_CACHE_DIR").ok()

@@ -1,8 +1,6 @@
 module walrus_remote::remote_state {
     use std::string::String;
-    use sui::table::{Self, Table};
-    use sui::clock::{Self, Clock};
-    use sui::vec_set::{Self, VecSet};
+    use sui::{clock::{Self, Clock}, table::{Self, Table}, vec_set::{Self, VecSet}};
 
     // Error codes
     const ERR_LOCK_HELD: u64 = 1;
@@ -28,7 +26,7 @@ module walrus_remote::remote_state {
     }
 
     /// Lock information with time-based expiration
-    public struct LockInfo has store, drop {
+    public struct LockInfo has drop, store {
         holder: address,
         expires_ms: u64,
     }
@@ -53,7 +51,7 @@ module walrus_remote::remote_state {
     public fun share_with_allowlist(
         mut state: RemoteState,
         initial_allowlist: vector<address>,
-        ctx: &TxContext
+        ctx: &TxContext,
     ) {
         // Only owner can share
         assert!(state.owner == ctx.sender(), ERR_NOT_OWNER);
@@ -73,11 +71,11 @@ module walrus_remote::remote_state {
     }
 
     /// Acquire lock with timeout (typically 5 minutes = 300000ms)
-    public fun acquire_lock(
+    public entry fun acquire_lock(
         state: &mut RemoteState,
         clock: &Clock,
-        timeout_ms: u64,
-        ctx: &TxContext
+        lock_timeout_ms: u64,
+        ctx: &TxContext,
     ) {
         check_authorized(state, ctx);
 
@@ -88,25 +86,19 @@ module walrus_remote::remote_state {
         if (option::is_some(&state.lock)) {
             let lock = option::borrow(&state.lock);
             // Allow re-acquisition if: same holder OR lock expired
-            assert!(
-                lock.holder == caller || current_time >= lock.expires_ms,
-                ERR_LOCK_HELD
-            );
+            assert!(lock.holder == caller || current_time >= lock.expires_ms, ERR_LOCK_HELD);
         };
 
         // Set new lock
         let new_lock = LockInfo {
             holder: caller,
-            expires_ms: current_time + timeout_ms,
+            expires_ms: current_time + lock_timeout_ms,
         };
         option::swap_or_fill(&mut state.lock, new_lock);
     }
 
     /// Release lock (caller must be lock holder)
-    public fun release_lock(
-        state: &mut RemoteState,
-        ctx: &TxContext
-    ) {
+    public fun release_lock(state: &mut RemoteState, ctx: &TxContext) {
         assert!(option::is_some(&state.lock), ERR_NO_LOCK);
 
         let lock = option::borrow(&state.lock);
@@ -120,7 +112,7 @@ module walrus_remote::remote_state {
         state: &mut RemoteState,
         ref_name: String,
         git_sha1: String,
-        ctx: &TxContext
+        ctx: &TxContext,
     ) {
         check_authorized(state, ctx);
 
@@ -133,11 +125,7 @@ module walrus_remote::remote_state {
     }
 
     /// Delete a ref
-    public fun delete_ref(
-        state: &mut RemoteState,
-        ref_name: String,
-        ctx: &TxContext
-    ) {
+    public fun delete_ref(state: &mut RemoteState, ref_name: String, ctx: &TxContext) {
         check_authorized(state, ctx);
 
         if (table::contains(&state.refs, ref_name)) {
@@ -150,18 +138,14 @@ module walrus_remote::remote_state {
         state: &mut RemoteState,
         blob_id: String,
         clock: &Clock,
-        ctx: &TxContext
+        ctx: &TxContext,
     ) {
         check_lock_held(state, clock, ctx);
         option::swap_or_fill(&mut state.objects_blob_id, blob_id);
     }
 
     /// Add address to allowlist (owner only)
-    public fun add_to_allowlist(
-        state: &mut RemoteState,
-        address_to_add: address,
-        ctx: &TxContext
-    ) {
+    public fun add_to_allowlist(state: &mut RemoteState, address_to_add: address, ctx: &TxContext) {
         assert!(state.owner == ctx.sender(), ERR_NOT_OWNER);
 
         if (option::is_none(&state.allowlist)) {
@@ -178,7 +162,7 @@ module walrus_remote::remote_state {
     public fun remove_from_allowlist(
         state: &mut RemoteState,
         address_to_remove: address,
-        ctx: &TxContext
+        ctx: &TxContext,
     ) {
         assert!(state.owner == ctx.sender(), ERR_NOT_OWNER);
 

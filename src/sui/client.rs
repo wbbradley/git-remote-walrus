@@ -6,18 +6,14 @@ use sui_config::PersistedConfig;
 use sui_keys::keystore::AccountKeystore;
 use sui_sdk::{
     rpc_types::{
-        SuiMoveStruct,
-        SuiMoveValue,
-        SuiObjectDataOptions,
-        SuiParsedData,
-        SuiTransactionBlockEffectsAPI,
-        SuiTransactionBlockResponseOptions,
+        SuiMoveStruct, SuiMoveValue, SuiObjectDataOptions, SuiParsedData,
+        SuiTransactionBlockEffectsAPI, SuiTransactionBlockResponseOptions,
     },
     sui_client_config::SuiClientConfig,
     SuiClientBuilder,
 };
 use sui_types::{
-    base_types::{ObjectID, ObjectRef, SuiAddress},
+    base_types::{ObjectID, ObjectRef, SequenceNumber, SuiAddress},
     crypto::Signature,
     dynamic_field::DynamicFieldName,
     programmable_transaction_builder::ProgrammableTransactionBuilder,
@@ -25,6 +21,7 @@ use sui_types::{
     transaction::{ObjectArg, Transaction, TransactionData},
     Identifier,
 };
+use tokio::time::Instant;
 
 /// Sui on-chain clock object ID (shared object at 0x6)
 const CLOCK_OBJECT_ID: &str = "0x0000000000000000000000000000000000000000000000000000000000000006";
@@ -242,7 +239,7 @@ impl SuiClient {
 
     /// Get the object reference for the RemoteState
     async fn get_state_object_ref(&self) -> Result<ObjectRef> {
-        let state_object_id = self.state_object_id.ok_or_else(|| {
+        let state_object_id = dbg!(self.state_object_id).ok_or_else(|| {
             anyhow::anyhow!("State object ID is not set - cannot get state object reference")
         })?;
         let object = self
@@ -553,7 +550,7 @@ impl SuiClient {
     /// Retries on 504 timeout errors since transaction may have succeeded
     pub async fn acquire_lock(&self, timeout_ms: u64) -> Result<()> {
         const MAX_RETRIES: u32 = 3;
-        const RETRY_DELAY_MS: u64 = 2000;
+        const RETRY_DELAY_MS: u64 = 200;
 
         for attempt in 0..MAX_RETRIES {
             if attempt > 0 {
@@ -575,9 +572,10 @@ impl SuiClient {
 
             // Add objects as inputs
             let state_arg = ptb.obj(ObjectArg::ImmOrOwnedObject(state_ref))?;
+            // ObjectArg::Receiving(state_ref),
             let clock_arg = ptb.obj(ObjectArg::SharedObject {
                 id: clock_ref.0,
-                initial_shared_version: clock_ref.1,
+                initial_shared_version: SequenceNumber::from(1),
                 mutable: false,
             })?;
 
@@ -585,7 +583,7 @@ impl SuiClient {
             let timeout_arg = ptb.pure(timeout_ms)?;
 
             ptb.programmable_move_call(
-                self.package_id,
+                dbg!(self.package_id),
                 Identifier::new("remote_state")?,
                 Identifier::new("acquire_lock")?,
                 vec![], // no type arguments
@@ -655,7 +653,7 @@ impl SuiClient {
         let state_arg = ptb.obj(ObjectArg::ImmOrOwnedObject(state_ref))?;
         let clock_arg = ptb.obj(ObjectArg::SharedObject {
             id: clock_ref.0,
-            initial_shared_version: clock_ref.1,
+            initial_shared_version: SequenceNumber::from(1),
             mutable: false,
         })?;
 
@@ -721,7 +719,7 @@ impl SuiClient {
         let state_arg = ptb.obj(ObjectArg::ImmOrOwnedObject(state_ref))?;
         let clock_arg = ptb.obj(ObjectArg::SharedObject {
             id: clock_ref.0,
-            initial_shared_version: clock_ref.1,
+            initial_shared_version: SequenceNumber::from(1),
             mutable: false,
         })?;
 
@@ -771,11 +769,13 @@ impl SuiClient {
         ptb: ProgrammableTransactionBuilder,
         gas_budget: u64,
     ) -> Result<()> {
+        eprintln!("sui: Executing programmable transaction...");
+        eprintln!("  Selecting gas coings for budget: {} MIST", gas_budget);
         // 1. Select enough gas coins to cover the budget
         let coins = self
             .client
             .coin_read_api()
-            .get_coins(self.sender, None, None, Some(500))
+            .get_coins(self.sender, None, None, Some(50))
             .await
             .context("Failed to fetch gas coins")?;
 
@@ -804,6 +804,7 @@ impl SuiClient {
             anyhow::bail!("No gas coins available for sender");
         }
 
+        eprintln!("  Fetching current gas price...");
         // 2. Get current gas price
         let gas_price = self
             .client
@@ -813,8 +814,9 @@ impl SuiClient {
             .context("Failed to get reference gas price")?;
 
         // 3. Build TransactionData with all selected gas coins
-        let pt = ptb.finish();
+        let pt = dbg!(ptb.finish());
         let gas_coin_refs: Vec<_> = gas_coins.iter().map(|c| c.object_ref()).collect();
+        let gas_coin_count = gas_coin_refs.len();
         let tx_data = TransactionData::new_programmable(
             self.sender,
             gas_coin_refs,
@@ -838,16 +840,25 @@ impl SuiClient {
 
         // 6. Execute transaction
         // Use WaitForEffectsCert for faster response (doesn't wait for local execution)
+        eprintln!("  Executing transaction on-chain [gas_coin_count={gas_coin_count}]...");
+        let start = Instant::now();
         let response = self
             .client
             .quorum_driver_api()
             .execute_transaction_block(
                 transaction,
-                SuiTransactionBlockResponseOptions::default().with_effects(),
+                SuiTransactionBlockResponseOptions::default()
+                    .with_effects()
+                    .with_input()
+                    .with_events()
+                    .with_object_changes()
+                    .with_balance_changes(),
                 Some(ExecuteTransactionRequestType::WaitForLocalExecution),
             )
             .await
-            .context("Failed to execute transaction")?;
+            .with_context(|| {
+                format!("Failed to execute transaction after {:?}", start.elapsed())
+            })?;
 
         // 7. Check for errors in transaction execution
         if let Some(effects) = &response.effects {
