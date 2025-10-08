@@ -63,15 +63,21 @@ You can also use environment variables:
 
 ### Setup: Deploy and Initialize
 
-First-time setup requires deploying the Move package and creating a remote:
+**One-time setup**: Deploy the Move package to Sui (only needed once per network):
 
 ```bash
-# Step 1: Deploy the Move package to Sui
+# Step 1: Deploy the Move package to Sui (one-time per network)
 git-remote-walrus deploy
 
 # This outputs a Package ID, for example:
 # Package ID: 0x1234abcd...
+```
 
+**Note**: The Package ID can be shared across all users on the same network. For production use, consider deploying once and documenting a canonical Package ID that all users can reference, rather than having each user deploy their own package.
+
+**Per-repository setup**: Create a new RemoteState object for each Git repository:
+
+```bash
 # Step 2: Create a private remote (only you can access)
 git-remote-walrus init 0x1234abcd...
 
@@ -84,6 +90,8 @@ git-remote-walrus init 0x1234abcd... --shared --allow 0xaddress1 --allow 0xaddre
 #   git remote add storage walrus::0x5678ef...
 #   git push storage main
 ```
+
+Note: You only need to deploy once, but you run `init` for each new Git repository you want to store in Walrus.
 
 ### Push to a Walrus remote
 
