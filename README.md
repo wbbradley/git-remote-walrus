@@ -4,12 +4,16 @@ A custom Git remote helper that stores repository data in a content-addressed, i
 
 ## Overview
 
-`git-remote-walrus` is a Git remote helper that implements the `walrus::` protocol, allowing you to push and pull Git repositories to/from a custom storage backend that enforces immutability constraints.
+`git-remote-walrus` is a Git remote helper that implements the `walrus::` protocol, allowing you to push and pull Git repositories to/from decentralized storage using Sui blockchain and the Walrus network. It also supports a local filesystem backend for testing.
 
 ## Features
 
+- **Decentralized storage**: Uses Sui blockchain for state and Walrus network for data
 - **Content-addressed storage**: All objects are stored using SHA-256 hashes
-- **Immutable storage**: Once written, files never change
+- **Immutable storage**: Once written, blobs never change
+- **Shared remotes**: Support for multi-user repositories with access control
+- **Blob lifecycle management**: Configurable storage durations with epoch-based expiration
+- **Local caching**: Automatic caching of Walrus blobs for performance
 - **Pluggable backends**: Storage layer is abstracted via traits
 - **Standard Git workflow**: Works with existing Git commands
 
@@ -29,9 +33,59 @@ cargo build --release
 export PATH="$PWD/target/release:$PATH"
 ```
 
+## Configuration
+
+Before using git-remote-walrus with Walrus, you need to configure your wallet paths:
+
+```bash
+# View current configuration
+git-remote-walrus config
+
+# Edit configuration (opens in $EDITOR)
+git-remote-walrus config --edit
+```
+
+Required configuration settings:
+- `sui_wallet_path`: Path to your Sui wallet config (e.g., `~/.sui/sui_config/client.yaml`)
+- `walrus_config_path`: Path to your Walrus config (e.g., `~/.config/walrus/client.yaml`)
+- `cache_dir`: Directory for caching Walrus blobs (e.g., `~/.cache/git-remote-walrus`)
+- `default_epochs`: Number of epochs to store blobs (default: 5)
+- `expiration_warning_threshold`: Warn when blobs expire within N epochs (default: 10)
+
+You can also use environment variables:
+- `SUI_WALLET`
+- `WALRUS_CONFIG`
+- `WALRUS_REMOTE_CACHE_DIR`
+- `WALRUS_REMOTE_BLOB_EPOCHS`
+- `WALRUS_EXPIRATION_WARNING_THRESHOLD`
+
 ## Usage
 
-### Push to a walrus remote
+### Setup: Deploy and Initialize
+
+First-time setup requires deploying the Move package and creating a remote:
+
+```bash
+# Step 1: Deploy the Move package to Sui
+git-remote-walrus deploy
+
+# This outputs a Package ID, for example:
+# Package ID: 0x1234abcd...
+
+# Step 2: Create a private remote (only you can access)
+git-remote-walrus init 0x1234abcd...
+
+# Or create a shared remote (accessible by multiple users)
+git-remote-walrus init 0x1234abcd... --shared --allow 0xaddress1 --allow 0xaddress2
+
+# This outputs an Object ID, for example:
+# ✓ Success! Your git remote is ready.
+# To use this remote:
+#   git remote add storage walrus::0x5678ef...
+#   git push storage main
+```
+
+### Push to a Walrus remote
 
 ```bash
 # Create a test repository
@@ -41,17 +95,17 @@ echo "Hello, World!" > file.txt
 git add .
 git commit -m "Initial commit"
 
-# Add walrus remote and push
-git remote add storage walrus::/tmp/mystorage
+# Add walrus remote (using Object ID from init command)
+git remote add storage walrus::0x5678ef...
 git push storage main
 ```
 
-### Clone from a walrus remote
+### Clone from a Walrus remote
 
 ```bash
-git clone walrus::/tmp/mystorage myclone
+git clone walrus::0x5678ef... myclone
 cd myclone
-# Your repository is now cloned!
+# Your repository is now cloned from Walrus!
 ```
 
 ### Incremental push
@@ -65,7 +119,35 @@ git commit -am "Update file"
 git push storage main
 ```
 
+### Local filesystem storage (for testing)
+
+You can also use local filesystem storage without Sui/Walrus:
+
+```bash
+# Add filesystem remote
+git remote add storage walrus::/tmp/mystorage
+git push storage main
+
+# Clone from filesystem
+git clone walrus::/tmp/mystorage myclone
+```
+
 ## Storage Structure
+
+### Walrus Backend (Sui + Walrus)
+
+When using Walrus storage, git-remote-walrus:
+- Stores repository state in a Sui RemoteState object (refs and object mappings)
+- Stores Git object data as blobs in the Walrus network
+- Caches Walrus blobs locally in `cache_dir` for performance
+- Manages blob lifecycles with configurable epoch durations
+
+The RemoteState object on Sui tracks:
+- Git refs (branches, tags) mapped to commit SHA-1s
+- Git object SHA-1s mapped to Walrus blob IDs
+- Blob metadata including expiration epochs
+
+### Filesystem Backend (for testing/development)
 
 The filesystem backend creates the following structure:
 
@@ -77,8 +159,7 @@ The filesystem backend creates the following structure:
 └── state.yaml         # Mutable state file
 ```
 
-### state.yaml Format
-
+state.yaml format:
 ```yaml
 refs:
   refs/heads/main: "abc123..."  # Git SHA-1 of commit
@@ -92,13 +173,22 @@ objects:
 
 The project is organized into several modules:
 
-- **main.rs**: Entry point and URL parsing
+- **main.rs**: Entry point, URL parsing, CLI commands (deploy, init, config)
 - **protocol.rs**: Git remote helper protocol handler
 - **commands/**: Implementation of Git commands (capabilities, list, import, export)
 - **storage/**: Storage abstraction layer
   - **traits.rs**: Storage trait definitions
-  - **filesystem.rs**: Filesystem backend implementation
+  - **filesystem.rs**: Filesystem backend implementation (for testing)
+  - **walrus.rs**: Walrus+Sui backend implementation
   - **state.rs**: State data structure
+- **sui/**: Sui blockchain interaction
+  - Wallet management
+  - RemoteState object operations
+  - Transaction building
+- **walrus/**: Walrus network integration
+  - Blob storage and retrieval
+  - Blob lifecycle management
+  - Local blob caching
 - **git/**: Git format handling
   - **fast_export.rs**: Parse fast-export streams
   - **fast_import.rs**: Generate fast-import streams
@@ -167,11 +257,8 @@ This makes the current implementation **unsuitable for production use** where co
 Current implementation:
 - Stores entire fast-export streams (no object deduplication yet)
 - Simple fast-export parser (may need improvements for complex repos)
-- No garbage collection
+- No automatic blob lifecycle extension (manual extension required before expiration)
 - No compression
-- Filesystem backend only
-
-See plan.md for future enhancements.
 
 ## References
 
