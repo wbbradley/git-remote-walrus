@@ -239,7 +239,7 @@ impl SuiClient {
 
     /// Get the object reference for the RemoteState
     async fn get_state_object_ref(&self) -> Result<ObjectRef> {
-        let state_object_id = dbg!(self.state_object_id).ok_or_else(|| {
+        let state_object_id = self.state_object_id.ok_or_else(|| {
             anyhow::anyhow!("State object ID is not set - cannot get state object reference")
         })?;
         let object = self
@@ -446,8 +446,10 @@ impl SuiClient {
             .context("Failed to get 'objects_blob_id' field")?;
 
         // Extract Option<String>
-        self.extract_option_string(blob_id_field)
+        self.extract_string(blob_id_field)
             .context("Failed to extract Option<String> from objects_blob_id")
+            .map(Some)
+            .or(Ok(None))
     }
 
     /// Helper: Get a field from SuiMoveStruct
@@ -499,6 +501,7 @@ impl SuiClient {
     }
 
     /// Helper: Extract Option<String> from SuiMoveValue
+    #[allow(dead_code)]
     fn extract_option_string(&self, value: &SuiMoveValue) -> Result<Option<String>> {
         use sui_sdk::rpc_types::SuiMoveValue;
 
@@ -583,7 +586,7 @@ impl SuiClient {
             let timeout_arg = ptb.pure(timeout_ms)?;
 
             ptb.programmable_move_call(
-                dbg!(self.package_id),
+                self.package_id,
                 Identifier::new("remote_state")?,
                 Identifier::new("acquire_lock")?,
                 vec![], // no type arguments
@@ -770,7 +773,7 @@ impl SuiClient {
         gas_budget: u64,
     ) -> Result<()> {
         eprintln!("sui: Executing programmable transaction...");
-        eprintln!("  Selecting gas coings for budget: {} MIST", gas_budget);
+        eprintln!("  Selecting gas coins for budget: {} MIST", gas_budget);
         // 1. Select enough gas coins to cover the budget
         let coins = self
             .client
@@ -814,7 +817,7 @@ impl SuiClient {
             .context("Failed to get reference gas price")?;
 
         // 3. Build TransactionData with all selected gas coins
-        let pt = dbg!(ptb.finish());
+        let pt = ptb.finish();
         let gas_coin_refs: Vec<_> = gas_coins.iter().map(|c| c.object_ref()).collect();
         let gas_coin_count = gas_coin_refs.len();
         let tx_data = TransactionData::new_programmable(

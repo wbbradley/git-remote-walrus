@@ -136,13 +136,11 @@ mod tests {
 
     #[test]
     fn test_env_override() {
-        env::set_var("SUI_RPC_URL", "https://custom.rpc.url");
-        env::set_var("WALRUS_BLOB_EPOCHS", "10");
+        env::set_var("WALRUS_REMOTE_BLOB_EPOCHS", "10");
 
         let config = WalrusRemoteConfig::load().unwrap();
         assert_eq!(config.default_epochs, 10);
 
-        env::remove_var("SUI_RPC_URL");
-        env::remove_var("WALRUS_BLOB_EPOCHS");
+        env::remove_var("WALRUS_REMOTE_BLOB_EPOCHS");
     }
 }

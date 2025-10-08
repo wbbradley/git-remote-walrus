@@ -123,10 +123,7 @@ impl WalrusClient {
         // Build walrus blob-status command
         // Use --blob-id flag to avoid blob IDs starting with '-' being interpreted as flags
         let mut cmd = Command::new("walrus");
-        cmd.arg("blob-status")
-            .arg("--json")
-            .arg("--blob-id")
-            .arg(blob_id);
+        cmd.arg("blob-status").arg("--json");
 
         if let Some(config) = &self.config_path {
             cmd.arg("--config").arg(config);
@@ -134,6 +131,8 @@ impl WalrusClient {
 
         // Execute command
         let output = cmd
+            .arg("--blob-id")
+            .arg(blob_id)
             .output()
             .context("Failed to execute walrus blob-status command")?;
 

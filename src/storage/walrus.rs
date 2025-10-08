@@ -235,8 +235,8 @@ impl ImmutableStore for WalrusStorage {
             }
             Err(e) => {
                 eprintln!(
-                    "git-remote-walrus: Warning: Failed to get blob status: {}",
-                    e
+                    "git-remote-walrus: Warning: Failed to get blob status: {} [blob_id: {}]",
+                    e, blob_id
                 );
             }
         }
