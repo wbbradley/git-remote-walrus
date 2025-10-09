@@ -6,6 +6,7 @@ use super::ContentId;
 
 /// The mutable state stored in state.yaml
 #[derive(Serialize, Deserialize, Default, Debug, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct State {
     /// Maps Git ref names to Git SHA-1 commit hashes (40 hex chars)
     /// BTreeMap ensures deterministic ordering for minimal diffs

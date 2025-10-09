@@ -9,8 +9,11 @@ use serde::{Deserialize, Serialize};
 
 /// Information about a tracked blob
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BlobInfo {
-    /// Walrus blob ID
+    /// Sui object ID of the SharedBlob
+    pub object_id: String,
+    /// Walrus blob ID (for reading content)
     pub blob_id: String,
     /// Epoch when blob expires
     pub end_epoch: u64,
@@ -21,8 +24,9 @@ pub struct BlobInfo {
 
 /// Tracks blob expiration epochs
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct BlobTracker {
-    /// Maps blob_id to expiration info
+    /// Maps object_id to expiration info
     #[serde(default)]
     blobs: BTreeMap<String, BlobInfo>,
 }
@@ -67,10 +71,17 @@ impl BlobTracker {
     }
 
     /// Track a new blob
-    pub fn track_blob(&mut self, blob_id: String, end_epoch: u64, size: Option<u64>) {
+    pub fn track_blob(
+        &mut self,
+        object_id: String,
+        blob_id: String,
+        end_epoch: u64,
+        size: Option<u64>,
+    ) {
         self.blobs.insert(
-            blob_id.clone(),
+            object_id.clone(),
             BlobInfo {
+                object_id,
                 blob_id,
                 end_epoch,
                 size,
@@ -78,10 +89,10 @@ impl BlobTracker {
         );
     }
 
-    /// Get blob info
+    /// Get blob info by object_id
     #[allow(dead_code)]
-    pub fn get_blob(&self, blob_id: &str) -> Option<&BlobInfo> {
-        self.blobs.get(blob_id)
+    pub fn get_blob(&self, object_id: &str) -> Option<&BlobInfo> {
+        self.blobs.get(object_id)
     }
 
     /// Get minimum expiration epoch across all blobs
@@ -97,10 +108,10 @@ impl BlobTracker {
             .collect()
     }
 
-    /// Remove blob from tracking
+    /// Remove blob from tracking by object_id
     #[allow(dead_code)]
-    pub fn untrack_blob(&mut self, blob_id: &str) -> Option<BlobInfo> {
-        self.blobs.remove(blob_id)
+    pub fn untrack_blob(&mut self, object_id: &str) -> Option<BlobInfo> {
+        self.blobs.remove(object_id)
     }
 
     /// Get all tracked blobs
@@ -149,8 +160,8 @@ mod tests {
     #[test]
     fn test_track_blob() {
         let mut tracker = BlobTracker::new();
-        tracker.track_blob("blob1".to_string(), 100, Some(1024));
-        tracker.track_blob("blob2".to_string(), 200, Some(2048));
+        tracker.track_blob("0x1".to_string(), "blob1".to_string(), 100, Some(1024));
+        tracker.track_blob("0x2".to_string(), "blob2".to_string(), 200, Some(2048));
 
         assert_eq!(tracker.count(), 2);
         assert_eq!(tracker.min_end_epoch(), Some(100));
@@ -159,13 +170,13 @@ mod tests {
     #[test]
     fn test_expiring_before() {
         let mut tracker = BlobTracker::new();
-        tracker.track_blob("blob1".to_string(), 100, None);
-        tracker.track_blob("blob2".to_string(), 200, None);
-        tracker.track_blob("blob3".to_string(), 300, None);
+        tracker.track_blob("0x1".to_string(), "blob1".to_string(), 100, None);
+        tracker.track_blob("0x2".to_string(), "blob2".to_string(), 200, None);
+        tracker.track_blob("0x3".to_string(), "blob3".to_string(), 300, None);
 
         let expiring = tracker.expiring_before(150);
         assert_eq!(expiring.len(), 1);
-        assert_eq!(expiring[0].blob_id, "blob1");
+        assert_eq!(expiring[0].object_id, "0x1");
 
         let expiring = tracker.expiring_before(250);
         assert_eq!(expiring.len(), 2);
@@ -174,8 +185,8 @@ mod tests {
     #[test]
     fn test_check_expiration_warning() {
         let mut tracker = BlobTracker::new();
-        tracker.track_blob("blob1".to_string(), 100, None);
-        tracker.track_blob("blob2".to_string(), 200, None);
+        tracker.track_blob("0x1".to_string(), "blob1".to_string(), 100, None);
+        tracker.track_blob("0x2".to_string(), "blob2".to_string(), 200, None);
 
         // Current epoch 50, warning threshold 60 (warn if expiring within 60 epochs)
         let (should_warn, min_epoch, expiring) = tracker.check_expiration_warning(50, 60);
@@ -193,7 +204,7 @@ mod tests {
     #[test]
     fn test_serialization() {
         let mut tracker = BlobTracker::new();
-        tracker.track_blob("blob1".to_string(), 100, Some(1024));
+        tracker.track_blob("0x1".to_string(), "blob1".to_string(), 100, Some(1024));
 
         let yaml = serde_yaml::to_string(&tracker).unwrap();
         let deserialized: BlobTracker = serde_yaml::from_str(&yaml).unwrap();

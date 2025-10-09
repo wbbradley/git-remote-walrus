@@ -194,14 +194,14 @@ impl ImmutableStore for WalrusStorage {
         // 1. Check if already in cache (by sha256)
         let mut cache_index = self.load_cache_index()?;
 
-        if let Some(blob_id) = cache_index.get_blob_id(&sha256) {
-            // Already cached, return blob_id
+        if let Some(object_id) = cache_index.get_object_id(&sha256) {
+            // Already cached, return object_id
             eprintln!(
                 "git-remote-walrus: Object '{}...' already cached as '{}...'",
                 &sha256[..8],
-                &blob_id[..16]
+                &object_id[..16]
             );
-            return Ok(blob_id.clone());
+            return Ok(object_id.clone());
         }
 
         // 2. Upload to Walrus
@@ -210,7 +210,7 @@ impl ImmutableStore for WalrusStorage {
             &sha256[..8],
             content.len()
         );
-        let blob_id = self
+        let blob_info = self
             .walrus_client
             .store(content)
             .context("Failed to store object in Walrus")?;
@@ -220,28 +220,34 @@ impl ImmutableStore for WalrusStorage {
             .write_object(content)
             .context("Failed to cache object locally")?;
 
-        // 4. Update cache index
-        cache_index.insert(blob_id.clone(), sha256.clone());
+        // 4. Update cache index (use shared_object_id as ContentId)
+        cache_index.insert(blob_info.shared_object_id.clone(), sha256.clone());
         self.save_cache_index(&cache_index)?;
 
-        // 5. Get blob status and track expiration
-        match self.walrus_client.blob_status(&blob_id) {
+        // 5. Get blob status from Sui and track expiration
+        match self
+            .runtime
+            .block_on(self.sui_client.get_shared_blob_status(&blob_info.shared_object_id))
+        {
             Ok(status) => {
-                if let Some(end_epoch) = status.end_epoch {
-                    let mut tracker = self.load_blob_tracker()?;
-                    tracker.track_blob(blob_id.clone(), end_epoch, Some(content.len() as u64));
-                    self.save_blob_tracker(&tracker)?;
-                }
+                let mut tracker = self.load_blob_tracker()?;
+                tracker.track_blob(
+                    status.object_id.clone(),
+                    status.blob_id,
+                    status.end_epoch,
+                    Some(content.len() as u64),
+                );
+                self.save_blob_tracker(&tracker)?;
             }
             Err(e) => {
                 eprintln!(
-                    "git-remote-walrus: Warning: Failed to get blob status: {} [blob_id: {}]",
-                    e, blob_id
+                    "git-remote-walrus: Warning: Failed to get blob status from Sui: {} [shared_object_id: {}]",
+                    e, blob_info.shared_object_id
                 );
             }
         }
 
-        Ok(blob_id)
+        Ok(blob_info.shared_object_id)
     }
 
     fn write_objects(&self, contents: &[&[u8]]) -> Result<Vec<ContentId>> {
@@ -254,6 +260,7 @@ impl ImmutableStore for WalrusStorage {
     }
 
     fn read_object(&self, id: &str) -> Result<Vec<u8>> {
+        // id is now an object_id
         // 1. Try to read from cache (by sha256)
         let cache_index = self.load_cache_index()?;
 
@@ -271,18 +278,36 @@ impl ImmutableStore for WalrusStorage {
             }
         }
 
-        // 2. Read from Walrus
-        eprintln!("git-remote-walrus: Downloading from Walrus: {}", &id[..16]);
+        // 2. Get blob_id from Sui object
+        eprintln!(
+            "git-remote-walrus: Querying Sui for blob_id (object: {})",
+            &id[..16]
+        );
+        let blob_status = self
+            .runtime
+            .block_on(self.sui_client.get_shared_blob_status(id))
+            .with_context(|| format!("Failed to get SharedBlob status for object {}", id))?;
+
+        // 3. Read from Walrus using blob_id
+        eprintln!(
+            "git-remote-walrus: Downloading from Walrus: {}",
+            &blob_status.blob_id[..16]
+        );
         let content = self
             .walrus_client
-            .read(id)
-            .with_context(|| format!("Failed to read object {} from Walrus", id))?;
+            .read(&blob_status.blob_id)
+            .with_context(|| {
+                format!(
+                    "Failed to read blob {} from Walrus (object: {})",
+                    blob_status.blob_id, id
+                )
+            })?;
 
-        // 3. Cache it locally
+        // 4. Cache it locally
         let sha256 = Self::compute_sha256(&content);
         let _ = self.cache.write_object(&content); // Ignore errors on cache write
 
-        // 4. Update cache index
+        // 5. Update cache index
         let mut cache_index = self.load_cache_index()?;
         cache_index.insert(id.to_string(), sha256);
         let _ = self.save_cache_index(&cache_index); // Ignore errors on index write
@@ -314,12 +339,11 @@ impl ImmutableStore for WalrusStorage {
         // Check cache index
         let cache_index = self.load_cache_index()?;
 
-        if cache_index.contains_blob(id) {
+        if cache_index.contains_object(id) {
             return Ok(true);
         }
 
-        // Could query Walrus blob-status, but for now assume not exists
-        // If we need it, we can add: self.walrus_client.blob_status(id).is_ok()
+        // Could query Sui for object, but for now assume not exists
         Ok(false)
     }
 }
@@ -339,25 +363,43 @@ impl MutableState for WalrusStorage {
 
         eprintln!("  Retrieved {} refs from Sui", refs.len());
 
-        // Get objects_blob_id from Sui
-        let objects_blob_id = self
+        // Get objects_blob_id (object_id) from Sui
+        let objects_object_id = self
             .runtime
             .block_on(self.sui_client.get_objects_blob_id())
-            .context("Failed to get objects blob ID from Sui")?;
+            .context("Failed to get objects object ID from Sui")?;
 
         // Download objects map from Walrus if it exists
-        let objects = if let Some(blob_id) = objects_blob_id {
+        let objects = if let Some(object_id) = objects_object_id {
             eprintln!(
-                "  Downloading objects map from Walrus (blob_id: {})",
-                &blob_id[..16]
+                "  Downloading objects map from Walrus (object_id: {})",
+                &object_id
             );
+
+            // Get blob_id from Sui
+            let blob_status = self
+                .runtime
+                .block_on(self.sui_client.get_shared_blob_status(&object_id))
+                .with_context(|| {
+                    format!(
+                        "Failed to get SharedBlob status for objects map (object: {})",
+                        object_id
+                    )
+                })?;
+
+            // Read from Walrus using blob_id
             let objects_yaml = self
                 .walrus_client
-                .read(&blob_id)
-                .context("Failed to read objects map from Walrus")?;
+                .read(&blob_status.blob_id)
+                .with_context(|| {
+                    format!(
+                        "Failed to read objects map from Walrus (blob: {}, object: {})",
+                        blob_status.blob_id, object_id
+                    )
+                })?;
             serde_yaml::from_slice(&objects_yaml).context("Failed to parse objects map YAML")?
         } else {
-            eprintln!("  No objects blob ID found, starting with empty objects map");
+            eprintln!("  No objects object ID found, starting with empty objects map");
             BTreeMap::new()
         };
 
@@ -394,12 +436,16 @@ impl MutableState for WalrusStorage {
             "  Uploading objects map to Walrus ({} bytes)...",
             objects_yaml.len()
         );
-        let objects_blob_id = self
+        let objects_blob_info = self
             .walrus_client
             .store(objects_yaml)
             .context("Failed to upload objects map to Walrus")?;
 
-        eprintln!("  Objects blob ID: {}", &objects_blob_id[..16]);
+        eprintln!(
+            "  Objects shared object ID: {} (blob: {})",
+            &objects_blob_info.shared_object_id,
+            &objects_blob_info.blob_id
+        );
 
         // Step 3: Convert refs to Vec for PTB
         let refs: Vec<(String, String)> = state
@@ -410,13 +456,13 @@ impl MutableState for WalrusStorage {
 
         // Step 4: Execute atomic PTB: update refs + update objects_blob_id + release lock
         eprintln!(
-            "  Executing atomic PTB (update {} refs + objects blob + release lock)...",
+            "  Executing atomic PTB (update {} refs + objects object + release lock)...",
             refs.len()
         );
         self.runtime
             .block_on(
                 self.sui_client
-                    .upsert_refs_and_update_objects(refs, objects_blob_id),
+                    .upsert_refs_and_update_objects(refs, objects_blob_info.shared_object_id),
             )
             .context("Failed to execute atomic PTB")?;
 

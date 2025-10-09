@@ -4,16 +4,17 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 /// Dual index for cache lookups
-/// Maps blob_id <-> sha256 bidirectionally
+/// Maps object_id <-> sha256 bidirectionally
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct CacheIndex {
-    /// Walrus blob_id -> SHA-256 hash
+    /// Sui object_id -> SHA-256 hash
     #[serde(default)]
-    blob_to_sha256: BTreeMap<String, String>,
+    object_to_sha256: BTreeMap<String, String>,
 
-    /// SHA-256 hash -> Walrus blob_id
+    /// SHA-256 hash -> Sui object_id
     #[serde(default)]
-    sha256_to_blob: BTreeMap<String, String>,
+    sha256_to_object: BTreeMap<String, String>,
 }
 
 impl CacheIndex {
@@ -54,39 +55,40 @@ impl CacheIndex {
         Ok(())
     }
 
-    /// Add a mapping between blob_id and sha256
-    pub fn insert(&mut self, blob_id: String, sha256: String) {
-        self.blob_to_sha256.insert(blob_id.clone(), sha256.clone());
-        self.sha256_to_blob.insert(sha256, blob_id);
+    /// Add a mapping between object_id and sha256
+    pub fn insert(&mut self, object_id: String, sha256: String) {
+        self.object_to_sha256
+            .insert(object_id.clone(), sha256.clone());
+        self.sha256_to_object.insert(sha256, object_id);
     }
 
-    /// Get SHA-256 from blob_id
-    pub fn get_sha256(&self, blob_id: &str) -> Option<&String> {
-        self.blob_to_sha256.get(blob_id)
+    /// Get SHA-256 from object_id
+    pub fn get_sha256(&self, object_id: &str) -> Option<&String> {
+        self.object_to_sha256.get(object_id)
     }
 
-    /// Get blob_id from SHA-256
-    pub fn get_blob_id(&self, sha256: &str) -> Option<&String> {
-        self.sha256_to_blob.get(sha256)
+    /// Get object_id from SHA-256
+    pub fn get_object_id(&self, sha256: &str) -> Option<&String> {
+        self.sha256_to_object.get(sha256)
     }
 
-    /// Check if blob_id exists in index
+    /// Check if object_id exists in index
     #[allow(dead_code)]
-    pub fn contains_blob(&self, blob_id: &str) -> bool {
-        self.blob_to_sha256.contains_key(blob_id)
+    pub fn contains_object(&self, object_id: &str) -> bool {
+        self.object_to_sha256.contains_key(object_id)
     }
 
     /// Check if sha256 exists in index
     #[allow(dead_code)]
     pub fn contains_sha256(&self, sha256: &str) -> bool {
-        self.sha256_to_blob.contains_key(sha256)
+        self.sha256_to_object.contains_key(sha256)
     }
 
-    /// Remove a mapping
+    /// Remove a mapping by object_id
     #[allow(dead_code)]
-    pub fn remove_by_blob_id(&mut self, blob_id: &str) -> Option<String> {
-        if let Some(sha256) = self.blob_to_sha256.remove(blob_id) {
-            self.sha256_to_blob.remove(&sha256);
+    pub fn remove_by_object_id(&mut self, object_id: &str) -> Option<String> {
+        if let Some(sha256) = self.object_to_sha256.remove(object_id) {
+            self.sha256_to_object.remove(&sha256);
             Some(sha256)
         } else {
             None
@@ -96,36 +98,36 @@ impl CacheIndex {
     /// Remove a mapping by SHA-256
     #[allow(dead_code)]
     pub fn remove_by_sha256(&mut self, sha256: &str) -> Option<String> {
-        if let Some(blob_id) = self.sha256_to_blob.remove(sha256) {
-            self.blob_to_sha256.remove(&blob_id);
-            Some(blob_id)
+        if let Some(object_id) = self.sha256_to_object.remove(sha256) {
+            self.object_to_sha256.remove(&object_id);
+            Some(object_id)
         } else {
             None
         }
     }
 
-    /// Get all blob_ids
+    /// Get all object_ids
     #[allow(dead_code)]
-    pub fn all_blob_ids(&self) -> impl Iterator<Item = &String> {
-        self.blob_to_sha256.keys()
+    pub fn all_object_ids(&self) -> impl Iterator<Item = &String> {
+        self.object_to_sha256.keys()
     }
 
     /// Get all sha256 hashes
     #[allow(dead_code)]
     pub fn all_sha256s(&self) -> impl Iterator<Item = &String> {
-        self.sha256_to_blob.keys()
+        self.sha256_to_object.keys()
     }
 
     /// Get count of indexed items
     #[allow(dead_code)]
     pub fn len(&self) -> usize {
-        self.blob_to_sha256.len()
+        self.object_to_sha256.len()
     }
 
     /// Check if index is empty
     #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
-        self.blob_to_sha256.is_empty()
+        self.object_to_sha256.is_empty()
     }
 }
 
@@ -139,11 +141,11 @@ mod tests {
     fn test_insert_and_lookup() {
         let mut index = CacheIndex::new();
 
-        index.insert("blob1".to_string(), "sha256_1".to_string());
-        index.insert("blob2".to_string(), "sha256_2".to_string());
+        index.insert("0x1".to_string(), "sha256_1".to_string());
+        index.insert("0x2".to_string(), "sha256_2".to_string());
 
-        assert_eq!(index.get_sha256("blob1"), Some(&"sha256_1".to_string()));
-        assert_eq!(index.get_blob_id("sha256_2"), Some(&"blob2".to_string()));
+        assert_eq!(index.get_sha256("0x1"), Some(&"sha256_1".to_string()));
+        assert_eq!(index.get_object_id("sha256_2"), Some(&"0x2".to_string()));
         assert_eq!(index.len(), 2);
     }
 
@@ -151,27 +153,27 @@ mod tests {
     fn test_bidirectional_lookup() {
         let mut index = CacheIndex::new();
 
-        index.insert("blob_abc".to_string(), "sha_xyz".to_string());
+        index.insert("0xabc".to_string(), "sha_xyz".to_string());
 
-        assert!(index.contains_blob("blob_abc"));
+        assert!(index.contains_object("0xabc"));
         assert!(index.contains_sha256("sha_xyz"));
-        assert_eq!(index.get_sha256("blob_abc"), Some(&"sha_xyz".to_string()));
-        assert_eq!(index.get_blob_id("sha_xyz"), Some(&"blob_abc".to_string()));
+        assert_eq!(index.get_sha256("0xabc"), Some(&"sha_xyz".to_string()));
+        assert_eq!(index.get_object_id("sha_xyz"), Some(&"0xabc".to_string()));
     }
 
     #[test]
     fn test_remove() {
         let mut index = CacheIndex::new();
 
-        index.insert("blob1".to_string(), "sha1".to_string());
-        index.insert("blob2".to_string(), "sha2".to_string());
+        index.insert("0x1".to_string(), "sha1".to_string());
+        index.insert("0x2".to_string(), "sha2".to_string());
 
-        assert_eq!(index.remove_by_blob_id("blob1"), Some("sha1".to_string()));
-        assert!(!index.contains_blob("blob1"));
+        assert_eq!(index.remove_by_object_id("0x1"), Some("sha1".to_string()));
+        assert!(!index.contains_object("0x1"));
         assert!(!index.contains_sha256("sha1"));
         assert_eq!(index.len(), 1);
 
-        assert_eq!(index.remove_by_sha256("sha2"), Some("blob2".to_string()));
+        assert_eq!(index.remove_by_sha256("sha2"), Some("0x2".to_string()));
         assert!(index.is_empty());
     }
 
@@ -181,14 +183,14 @@ mod tests {
         let index_path = dir.path().join("cache_index.yaml");
 
         let mut index = CacheIndex::new();
-        index.insert("blob1".to_string(), "sha1".to_string());
-        index.insert("blob2".to_string(), "sha2".to_string());
+        index.insert("0x1".to_string(), "sha1".to_string());
+        index.insert("0x2".to_string(), "sha2".to_string());
 
         index.save(&index_path).unwrap();
 
         let loaded = CacheIndex::load(&index_path).unwrap();
         assert_eq!(loaded.len(), 2);
-        assert_eq!(loaded.get_sha256("blob1"), Some(&"sha1".to_string()));
-        assert_eq!(loaded.get_blob_id("sha2"), Some(&"blob2".to_string()));
+        assert_eq!(loaded.get_sha256("0x1"), Some(&"sha1".to_string()));
+        assert_eq!(loaded.get_object_id("sha2"), Some(&"0x2".to_string()));
     }
 }

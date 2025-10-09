@@ -34,13 +34,47 @@ sui client --client.config working_dir/sui_client.yaml faucet --url http://127.0
 
 ## git-remote-walrus cheatsheet
 
+### git-remote-walrus configuration
+
+Place the following in `"$HOME"/.config/git-remote-walrus/config.yaml`:
+
+```yaml
+# This is pointing at the walrus/working_dir, a by-product of Walrus's local-testbed.sh script.
+sui_wallet_path: ~/src/walrus/working_dir/sui_client.yaml
+walrus_config_path: ~/src/walrus/working_dir/client_config.yaml
+cache_dir: ~/.cache/git-remote-walrus
+```
+
+### Deploy remote_state package to configured network (localnet, for example)
 Now that you have a local sui + walrus network running, you can use the `git-remote-walrus` tool to
 deploy its remote_state package to your local sui network.
 
 ```bash
 cd git-remote-walrus  # This repo's directory.
-git-remote-walrus deploy
+cargo build --release
+./target/release/git-remote-walrus deploy
 ```
 
 The above command will build the `remote_state` package and deploy it to your local sui network, and
 then give you instructions on how to proceed.
+
+### Git needs to be able to find git-remote-walrus
+
+**Make sure to place ./target/release/git-remote-walrus in your PATH.** Or, put a script like this
+in your path.
+
+```bash
+#!/bin/bash
+die() {
+    echo "git-remote-walrus[bootstrap]: error: $*" >&2
+    exit 1
+}
+
+[ -d "$HOME"/src/git-remote-walrus ] || die "Directory $HOME/src/git-remote-walrus does not exist"
+echo "git-remote-walrus[bootstrap]: Building git-remote-walrus..." >&2
+cargo build --manifest-path "$HOME"/src/git-remote-walrus/Cargo.toml --release 1>&2 \
+  || die "Failed to build git-remote-walrus"
+echo "git-remote-walrus[bootstrap]: git-remote-walrus build complete. Running..." >&2
+exec "$HOME"/src/git-remote-walrus/target/release/git-remote-walrus "$@"
+```
+

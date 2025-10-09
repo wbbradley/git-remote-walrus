@@ -2588,11 +2588,13 @@ name = "git-remote-walrus"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "clap",
  "dirs 6.0.0",
  "flate2",
  "gix-object",
  "hex",
+ "num-bigint 0.4.6",
  "serde",
  "serde_json",
  "serde_yaml 0.9.34+deprecated",

@@ -1,6 +1,9 @@
 use std::{collections::BTreeMap, path::PathBuf};
 
 use anyhow::{Context, Result};
+use base64::display::Base64Display;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use num_bigint::BigUint;
 use shared_crypto::intent::Intent;
 use sui_config::PersistedConfig;
 use sui_keys::keystore::AccountKeystore;
@@ -28,6 +31,14 @@ const CLOCK_OBJECT_ID: &str = "0x00000000000000000000000000000000000000000000000
 
 /// Default gas budget for transactions (1 SUI = 1_000_000_000 MIST)
 const DEFAULT_GAS_BUDGET: u64 = 10_000_000_000; // 0.1 SUI
+
+/// Status information for a SharedBlob object
+#[derive(Debug, Clone)]
+pub struct SharedBlobStatus {
+    pub object_id: String,
+    pub blob_id: String,
+    pub end_epoch: u64,
+}
 
 /// Sui client for interacting with RemoteState on-chain
 pub struct SuiClient {
@@ -440,16 +451,23 @@ impl SuiClient {
             _ => anyhow::bail!("Expected MoveObject"),
         };
 
-        // Extract the "objects_blob_id" field which is Option<String>
+        // Extract the "objects_blob_id" field which is Option<Address> or Address
         let blob_id_field = self
             .get_struct_field(&move_obj.fields, "objects_blob_id")
             .context("Failed to get 'objects_blob_id' field")?;
 
-        // Extract Option<String>
-        self.extract_string(blob_id_field)
-            .context("Failed to extract Option<String> from objects_blob_id")
-            .map(Some)
-            .or(Ok(None))
+        eprintln!(
+            "sui: Extracting objects_blob_id from field: {:?}",
+            blob_id_field
+        );
+
+        // Extract Option<String> - field can be Option<Address> or direct Address
+        let result = self
+            .extract_option_string_or_address(blob_id_field)
+            .context("Failed to extract object ID from objects_blob_id")?;
+
+        eprintln!("sui: Extracted objects_blob_id: {:?}", result);
+        Ok(result)
     }
 
     /// Helper: Get a field from SuiMoveStruct
@@ -500,18 +518,133 @@ impl SuiClient {
         }
     }
 
-    /// Helper: Extract Option<String> from SuiMoveValue
-    #[allow(dead_code)]
-    fn extract_option_string(&self, value: &SuiMoveValue) -> Result<Option<String>> {
+    /// Helper: Extract String from Address or String SuiMoveValue
+    fn extract_string_or_address(&self, value: &SuiMoveValue) -> Result<String> {
+        use sui_sdk::rpc_types::SuiMoveValue;
+
+        match value {
+            SuiMoveValue::String(s) => Ok(s.clone()),
+            SuiMoveValue::Address(addr) => Ok(addr.to_string()),
+            _ => anyhow::bail!("Expected String or Address, got {:?}", value),
+        }
+    }
+
+    /// Helper: Extract Option<String> from Option<Address> or Option<String>
+    fn extract_option_string_or_address(&self, value: &SuiMoveValue) -> Result<Option<String>> {
         use sui_sdk::rpc_types::SuiMoveValue;
 
         match value {
             SuiMoveValue::Option(opt) => match opt.as_ref() {
-                Some(inner) => Ok(Some(self.extract_string(inner)?)),
+                Some(inner) => Ok(Some(self.extract_string_or_address(inner)?)),
                 None => Ok(None),
             },
-            _ => anyhow::bail!("Expected Option, got {:?}", value),
+            // Handle direct Address (not wrapped in Option) - legacy case
+            SuiMoveValue::Address(addr) => Ok(Some(addr.to_string())),
+            _ => anyhow::bail!("Expected Option<Address> or Address, got {:?}", value),
         }
+    }
+
+    /// Helper: Extract u64 from SuiMoveValue
+    fn extract_u64(&self, value: &SuiMoveValue) -> Result<u64> {
+        use sui_sdk::rpc_types::SuiMoveValue;
+
+        match value {
+            SuiMoveValue::Number(n) => Ok(*n as u64),
+            SuiMoveValue::String(s) => s
+                .parse::<u64>()
+                .with_context(|| format!("Failed to parse u64 from string: {}", s)),
+            _ => anyhow::bail!("Expected Number or String for u64, got {:?}", value),
+        }
+    }
+
+    /// Get SharedBlob status from Sui
+    /// Extracts object_id, blob_id, and end_epoch from a SharedBlob object
+    pub async fn get_shared_blob_status(&self, object_id: &str) -> Result<SharedBlobStatus> {
+        eprintln!("sui: Querying SharedBlob object: {}", object_id);
+
+        // Parse object ID
+        let obj_id = ObjectID::from_hex_literal(object_id)
+            .with_context(|| format!("Invalid object ID: {}", object_id))?;
+
+        // Get the SharedBlob object with content
+        let object = self
+            .client
+            .read_api()
+            .get_object_with_options(
+                obj_id,
+                SuiObjectDataOptions::new()
+                    .with_content()
+                    .with_bcs()
+                    .with_type()
+                    .with_owner(),
+            )
+            .await
+            .with_context(|| format!("Failed to fetch SharedBlob object {}", object_id))?;
+
+        eprintln!(
+            "sui: Query response - data: {:?}, error: {:?}",
+            object.data.is_some(),
+            object.error
+        );
+
+        let data = object.data.ok_or_else(|| {
+            anyhow::anyhow!(
+                "SharedBlob object not found: {} (error: {:?})",
+                object_id,
+                object.error
+            )
+        })?;
+
+        let content = data
+            .content
+            .ok_or_else(|| anyhow::anyhow!("SharedBlob has no content: {}", object_id))?;
+
+        // Extract fields from the SharedBlob object
+        let move_obj = match content {
+            SuiParsedData::MoveObject(obj) => obj,
+            _ => anyhow::bail!("Expected MoveObject for SharedBlob"),
+        };
+
+        // Navigate to: content.fields.blob.fields
+        let blob_field = self
+            .get_struct_field(&move_obj.fields, "blob")
+            .context("Failed to get 'blob' field from SharedBlob")?;
+
+        let blob_struct = match blob_field {
+            SuiMoveValue::Struct(s) => s,
+            _ => anyhow::bail!("Expected Struct for blob field"),
+        };
+
+        // Extract blob_id (stored as u256 decimal, convert to base64)
+        let blob_id_value = self
+            .get_struct_field(blob_struct, "blob_id")
+            .context("Failed to get 'blob_id' field from Blob")?;
+        let blob_id_u256 = self.extract_string(blob_id_value)?;
+        eprintln!("sui: blob_id as u256 decimal: {}", blob_id_u256);
+        let blob_id = parse_num_blob_id(&blob_id_u256)?;
+        eprintln!("sui: blob_id as base64: {}", blob_id);
+
+        // Navigate to: blob.fields.storage.fields
+        let storage_field = self
+            .get_struct_field(blob_struct, "storage")
+            .context("Failed to get 'storage' field from Blob")?;
+
+        let storage_struct = match storage_field {
+            SuiMoveValue::Struct(s) => s,
+            _ => anyhow::bail!("Expected Struct for storage field"),
+        };
+
+        // Extract end_epoch
+        let end_epoch_value = self
+            .get_struct_field(storage_struct, "end_epoch")
+            .context("Failed to get 'end_epoch' field from Storage")?;
+        let end_epoch = self.extract_u64(end_epoch_value)?;
+
+        Ok(SharedBlobStatus {
+            object_id: object_id.to_string(),
+            blob_id,
+            end_epoch,
+        })
     }
 
     /// Batch upsert refs using PTB
@@ -712,6 +845,11 @@ impl SuiClient {
         refs: Vec<(String, String)>,
         objects_blob_id: String,
     ) -> Result<()> {
+        eprintln!(
+            "sui: Storing objects_blob_id to RemoteState: {}",
+            objects_blob_id
+        );
+
         let mut ptb = ProgrammableTransactionBuilder::new();
 
         // Get object references
@@ -994,6 +1132,19 @@ impl SuiClient {
 
         anyhow::bail!("No RemoteState object was created in transaction")
     }
+}
+
+fn parse_num_blob_id(s: &str) -> Result<String> {
+    if let Some(number) = BigUint::parse_bytes(s.as_bytes(), 10) {
+        let bytes = number.to_bytes_le();
+
+        if bytes.len() <= 32 {
+            let mut blob_id = [0; 32];
+            blob_id[..bytes.len()].copy_from_slice(&bytes);
+            return Ok(Base64Display::new(&blob_id, &URL_SAFE_NO_PAD).to_string());
+        }
+    }
+    anyhow::bail!("Unable to parse numeric blob id: {s}");
 }
 
 #[cfg(test)]
