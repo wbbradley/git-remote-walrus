@@ -245,29 +245,6 @@ The tool logs to stderr, so you can see debug output while Git communicates via 
 6. Helper outputs streams to Git as fast-import format
 7. Git imports objects into local repository
 
-## Limitations
-
-### Critical Limitation: GPG Signatures Not Preserved
-
-**⚠️ IMPORTANT**: Due to using `git fast-export/fast-import`, GPG commit signatures are **not preserved**. This means:
-- Commits with GPG signatures will lose their signatures when pushed/cloned
-- Commit SHAs will change because the signature is part of the commit object
-- All child commits will also get new SHAs (cascading effect)
-
-This makes the current implementation **unsuitable for production use** where commit signature verification is required.
-
-**Workaround**: For unsigned commits only, or if you don't need to preserve exact SHAs.
-
-**Future Fix**: To properly preserve GPG signatures and exact Git SHAs, we need to switch from fast-export/fast-import to using Git's native pack format or raw object storage.
-
-### Other Limitations
-
-Current implementation:
-- Stores entire fast-export streams (no object deduplication yet)
-- Simple fast-export parser (may need improvements for complex repos)
-- No automatic blob lifecycle extension (manual extension required before expiration)
-- No compression
-
 ## References
 
 - [Git Remote Helpers](https://git-scm.com/docs/gitremote-helpers)
