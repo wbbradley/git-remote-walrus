@@ -18,7 +18,7 @@ use crate::{
 /// Architecture:
 /// - Git objects -> Walrus blobs (with local filesystem cache)
 /// - Git refs -> Sui on-chain (RemoteState.refs table)
-/// - Objects map -> Walrus blob (RemoteState.objects_blob_id points to it)
+/// - Objects map -> Walrus blob (RemoteState.objects_blob_object_id points to it)
 /// - Lock -> Sui on-chain (RemoteState.lock)
 pub struct WalrusStorage {
     /// Configuration
@@ -378,10 +378,10 @@ impl MutableState for WalrusStorage {
 
         tracing::info!("  Retrieved {} refs from Sui", refs.len());
 
-        // Get objects_blob_id (object_id) from Sui
+        // Get objects_blob_object_id from Sui
         let objects_object_id = self
             .runtime
-            .block_on(self.sui_client.get_objects_blob_id())
+            .block_on(self.sui_client.get_objects_blob_object_id())
             .context("Failed to get objects object ID from Sui")?;
 
         // Download objects map from Walrus if it exists
@@ -477,7 +477,7 @@ impl MutableState for WalrusStorage {
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
 
-        // Step 4: Execute atomic PTB: update refs + update objects_blob_id + release lock
+        // Step 4: Execute atomic PTB: update refs + update objects_blob_object_id + release lock
         tracing::info!(
             "  Executing atomic PTB (update {} refs + objects object + release lock)...",
             refs.len()

@@ -19,7 +19,7 @@ pub fn handle<S: StorageBackend, W: Write>(
     output: &mut W,
     refs: &[String],
 ) -> Result<()> {
-    tracing::info!("Fetch requested for refs: {:?}", refs);
+    tracing::debug!("fetch requested for refs: {:?}", refs);
 
     // Create packfile in memory
     let mut packfile = Vec::new();
@@ -79,6 +79,6 @@ pub fn handle<S: StorageBackend, W: Write>(
     writeln!(output)?;
     output.flush()?;
 
-    tracing::info!("Fetch completed");
+    tracing::info!("fetch completed");
     Ok(())
 }

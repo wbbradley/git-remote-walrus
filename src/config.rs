@@ -45,10 +45,11 @@ impl WalrusRemoteConfig {
     pub fn load() -> Result<Self> {
         // Try to load from config file
         let config_path = Self::config_file_path()?;
+        tracing::debug!("loading git-remote-walrus config from {:?}", config_path);
         let mut config = if config_path.exists() {
             Self::load_from_file(&config_path)?
         } else {
-            anyhow::bail!("Config file not found at {:?}", config_path);
+            anyhow::bail!("config file not found at {:?}", config_path);
         };
 
         if let Ok(path) = env::var("SUI_WALLET") {

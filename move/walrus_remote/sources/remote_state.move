@@ -17,8 +17,8 @@ module walrus_remote::remote_state {
         owner: address,
         /// Git refs (branch/tag names) -> Git SHA-1 commit hashes
         refs: Table<String, String>,
-        /// Walrus blob ID containing the objects map (git_sha1 -> blob_id)
-        objects_blob_id: Option<String>,
+        /// Sui object ID of SharedBlob containing the objects map (git_sha1 -> blob_id)
+        objects_blob_object_id: Option<String>,
         /// Lock for atomic updates
         lock: Option<LockInfo>,
         /// Optional allowlist for multi-user repos
@@ -38,7 +38,7 @@ module walrus_remote::remote_state {
             id: object::new(ctx),
             owner,
             refs: table::new(ctx),
-            objects_blob_id: option::none(),
+            objects_blob_object_id: option::none(),
             lock: option::none(),
             allowlist: option::none(),
         };
@@ -133,15 +133,15 @@ module walrus_remote::remote_state {
         };
     }
 
-    /// Update objects blob ID (requires lock)
+    /// Update objects blob object ID (requires lock)
     public fun update_objects_blob(
         state: &mut RemoteState,
-        blob_id: String,
+        blob_object_id: String,
         clock: &Clock,
         ctx: &mut TxContext,
     ) {
         check_lock_held(state, clock, ctx);
-        option::swap_or_fill(&mut state.objects_blob_id, blob_id);
+        option::swap_or_fill(&mut state.objects_blob_object_id, blob_object_id);
     }
 
     /// Add address to allowlist (owner only)
@@ -185,9 +185,9 @@ module walrus_remote::remote_state {
         }
     }
 
-    /// Get objects blob ID
-    public fun get_objects_blob_id(state: &RemoteState): Option<String> {
-        state.objects_blob_id
+    /// Get objects blob object ID
+    public fun get_objects_blob_object_id(state: &RemoteState): Option<String> {
+        state.objects_blob_object_id
     }
 
     /// Check if address is authorized
@@ -255,7 +255,7 @@ module walrus_remote::remote_state {
             id: object::new(ctx),
             owner: ctx.sender(),
             refs: table::new(ctx),
-            objects_blob_id: option::none(),
+            objects_blob_object_id: option::none(),
             lock: option::none(),
             allowlist: option::none(),
         }
@@ -263,7 +263,7 @@ module walrus_remote::remote_state {
 
     #[test_only]
     public fun destroy_for_testing(state: RemoteState) {
-        let RemoteState { id, owner: _, refs, objects_blob_id: _, lock: _, allowlist: _ } = state;
+        let RemoteState { id, owner: _, refs, objects_blob_object_id: _, lock: _, allowlist: _ } = state;
         table::drop(refs);
         object::delete(id);
     }

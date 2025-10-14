@@ -25,16 +25,16 @@ pub fn handle<S: StorageBackend, W: Write, R: BufRead>(
             // Fast-export failed or returned no updates
             // This can happen with annotated tags
             // Fall back to using git show-ref to get all refs that need pushing
-            tracing::warn!("Fast-export failed or empty, using fallback method");
+            tracing::warn!("fast-export failed or empty, using fallback method");
             get_refs_from_git()?
         }
     };
 
-    tracing::debug!("Ref updates from Git: {:?}", ref_updates);
+    tracing::debug!("ref updates from git: {:?}", ref_updates);
 
     // For each ref being pushed, get the commit SHA
     for refname in ref_updates.keys() {
-        tracing::info!("Processing ref {}", refname);
+        tracing::debug!(refname, "processing ref");
 
         // Get the commit SHA that this ref points to locally
         let sha_output = Command::new("git")
@@ -65,7 +65,7 @@ pub fn handle<S: StorageBackend, W: Write, R: BufRead>(
             git_sha1.clone()
         };
 
-        tracing::info!("Creating packfile for {}", rev_range);
+        tracing::debug!("Creating packfile for {}", rev_range);
 
         // Use git pack-objects --include-tag to include annotated tag objects
         let mut pack_output = Command::new("git")
@@ -91,20 +91,14 @@ pub fn handle<S: StorageBackend, W: Write, R: BufRead>(
             anyhow::bail!("git pack-objects failed");
         }
 
-        tracing::info!(
-            "Created packfile of {} bytes",
-            pack_result.stdout.len()
-        );
+        tracing::debug!("created packfile of {} bytes", pack_result.stdout.len());
 
         // Receive and store the packfile
         let mut pack_data = &pack_result.stdout[..];
         let object_mappings =
             receive_pack(&mut pack_data, storage).context("Failed to receive pack")?;
 
-        tracing::info!(
-            "Stored {} objects",
-            object_mappings.len()
-        );
+        tracing::debug!("stored {} objects", object_mappings.len());
 
         // Update state with new objects and ref
         storage.update_state(|state| {

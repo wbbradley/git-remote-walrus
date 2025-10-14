@@ -359,8 +359,8 @@ impl SuiClient {
         Ok(refs)
     }
 
-    /// Get objects blob ID from on-chain state
-    pub async fn get_objects_blob_id(&self) -> Result<Option<String>> {
+    /// Get objects blob object ID from on-chain state
+    pub async fn get_objects_blob_object_id(&self) -> Result<Option<String>> {
         let state_object_id = self.state_object_id.ok_or_else(|| {
             anyhow::anyhow!("State object ID is not set - cannot get state object reference")
         })?;
@@ -383,8 +383,8 @@ impl SuiClient {
             .content
             .ok_or_else(|| anyhow::anyhow!("RemoteState has no content"))?;
 
-        // Extract objects_blob_id from the struct
-        self.extract_objects_blob_id_from_content(&content)
+        // Extract objects_blob_object_id from the struct
+        self.extract_objects_blob_object_id_from_content(&content)
     }
 
     /// Helper: Extract the Table ID from RemoteState content
@@ -441,8 +441,8 @@ impl SuiClient {
             .context("Failed to extract string from dynamic field value")
     }
 
-    /// Helper: Extract objects_blob_id from RemoteState content
-    fn extract_objects_blob_id_from_content(
+    /// Helper: Extract objects_blob_object_id from RemoteState content
+    fn extract_objects_blob_object_id_from_content(
         &self,
         content: &SuiParsedData,
     ) -> Result<Option<String>> {
@@ -451,22 +451,22 @@ impl SuiClient {
             _ => anyhow::bail!("Expected MoveObject"),
         };
 
-        // Extract the "objects_blob_id" field which is Option<Address> or Address
-        let blob_id_field = self
-            .get_struct_field(&move_obj.fields, "objects_blob_id")
-            .context("Failed to get 'objects_blob_id' field")?;
+        // Extract the "objects_blob_object_id" field which is Option<Address> or Address
+        let blob_object_id_field = self
+            .get_struct_field(&move_obj.fields, "objects_blob_object_id")
+            .context("Failed to get 'objects_blob_object_id' field")?;
 
         tracing::debug!(
-            "sui: Extracting objects_blob_id from field: {:?}",
-            blob_id_field
+            "sui: Extracting objects_blob_object_id from field: {:?}",
+            blob_object_id_field
         );
 
         // Extract Option<String> - field can be Option<Address> or direct Address
         let result = self
-            .extract_option_string_or_address(blob_id_field)
-            .context("Failed to extract object ID from objects_blob_id")?;
+            .extract_option_string_or_address(blob_object_id_field)
+            .context("Failed to extract object ID from objects_blob_object_id")?;
 
-        tracing::debug!("sui: Extracted objects_blob_id: {:?}", result);
+        tracing::debug!("sui: Extracted objects_blob_object_id: {:?}", result);
         Ok(result)
     }
 
@@ -842,11 +842,11 @@ impl SuiClient {
     pub async fn upsert_refs_and_update_objects(
         &self,
         refs: Vec<(String, String)>,
-        objects_blob_id: String,
+        objects_blob_object_id: String,
     ) -> Result<()> {
         tracing::debug!(
-            "sui: Storing objects_blob_id to RemoteState: {}",
-            objects_blob_id
+            "sui: Storing objects_blob_object_id to RemoteState: {}",
+            objects_blob_object_id
         );
 
         let mut ptb = ProgrammableTransactionBuilder::new();
@@ -877,15 +877,15 @@ impl SuiClient {
             );
         }
 
-        // 2. Update objects blob ID
-        let objects_blob_arg = ptb.pure(objects_blob_id)?;
+        // 2. Update objects blob object ID
+        let objects_blob_object_arg = ptb.pure(objects_blob_object_id)?;
 
         ptb.programmable_move_call(
             self.package_id,
             Identifier::new("remote_state")?,
             Identifier::new("update_objects_blob")?,
             vec![], // no type arguments
-            vec![state_arg, objects_blob_arg, clock_arg],
+            vec![state_arg, objects_blob_object_arg, clock_arg],
         );
 
         // 3. Release lock
@@ -1123,7 +1123,6 @@ impl SuiClient {
                     .to_string()
                     .contains("remote_state::RemoteState")
                 {
-                    tracing::info!("sui: RemoteState created: {}", object_id.to_hex_literal());
                     return Ok(object_id);
                 }
             }
