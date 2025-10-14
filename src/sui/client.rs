@@ -456,7 +456,7 @@ impl SuiClient {
             .get_struct_field(&move_obj.fields, "objects_blob_id")
             .context("Failed to get 'objects_blob_id' field")?;
 
-        eprintln!(
+        tracing::debug!(
             "sui: Extracting objects_blob_id from field: {:?}",
             blob_id_field
         );
@@ -466,7 +466,7 @@ impl SuiClient {
             .extract_option_string_or_address(blob_id_field)
             .context("Failed to extract object ID from objects_blob_id")?;
 
-        eprintln!("sui: Extracted objects_blob_id: {:?}", result);
+        tracing::debug!("sui: Extracted objects_blob_id: {:?}", result);
         Ok(result)
     }
 
@@ -560,7 +560,7 @@ impl SuiClient {
     /// Get SharedBlob status from Sui
     /// Extracts object_id, blob_id, and end_epoch from a SharedBlob object
     pub async fn get_shared_blob_status(&self, object_id: &str) -> Result<SharedBlobStatus> {
-        eprintln!("sui: Querying SharedBlob object: {}", object_id);
+        tracing::debug!("sui: Querying SharedBlob object: {}", object_id);
 
         // Parse object ID
         let obj_id = ObjectID::from_hex_literal(object_id)
@@ -581,7 +581,7 @@ impl SuiClient {
             .await
             .with_context(|| format!("Failed to fetch SharedBlob object {}", object_id))?;
 
-        eprintln!(
+        tracing::debug!(
             "sui: Query response - data: {:?}, error: {:?}",
             object.data.is_some(),
             object.error
@@ -620,9 +620,8 @@ impl SuiClient {
             .get_struct_field(blob_struct, "blob_id")
             .context("Failed to get 'blob_id' field from Blob")?;
         let blob_id_u256 = self.extract_string(blob_id_value)?;
-        eprintln!("sui: blob_id as u256 decimal: {}", blob_id_u256);
         let blob_id = parse_num_blob_id(&blob_id_u256)?;
-        eprintln!("sui: blob_id as base64: {}", blob_id);
+        tracing::debug!("sui: blob_id: {}", blob_id);
 
         // Navigate to: blob.fields.storage.fields
         let storage_field = self
@@ -690,12 +689,12 @@ impl SuiClient {
 
         for attempt in 0..MAX_RETRIES {
             if attempt > 0 {
-                eprintln!("  Retry attempt {} after 504 timeout...", attempt);
+                tracing::info!("  Retry attempt {} after 504 timeout...", attempt);
                 tokio::time::sleep(tokio::time::Duration::from_millis(RETRY_DELAY_MS)).await;
 
                 // Check if lock was actually acquired despite the timeout
                 if self.check_lock_acquired().await? {
-                    eprintln!("  Lock was already acquired in previous attempt");
+                    tracing::info!("  Lock was already acquired in previous attempt");
                     return Ok(());
                 }
             }
@@ -730,11 +729,11 @@ impl SuiClient {
             match self.execute_ptb(ptb, DEFAULT_GAS_BUDGET).await {
                 Ok(()) => return Ok(()),
                 Err(e) => {
-                    eprintln!("git-remote-walrus: [acquire_lock(timeout_ms={timeout_ms})] execute_ptb error: {e:?}");
+                    tracing::error!("git-remote-walrus: [acquire_lock(timeout_ms={timeout_ms})] execute_ptb error: {e:?}");
                     let err_str = e.to_string();
                     // Retry only on 504 timeouts
                     if err_str.contains("504") && attempt < MAX_RETRIES - 1 {
-                        eprintln!(
+                        tracing::warn!(
                             "  Got 504 timeout on attempt {}, will retry...",
                             attempt + 1
                         );
@@ -845,7 +844,7 @@ impl SuiClient {
         refs: Vec<(String, String)>,
         objects_blob_id: String,
     ) -> Result<()> {
-        eprintln!(
+        tracing::debug!(
             "sui: Storing objects_blob_id to RemoteState: {}",
             objects_blob_id
         );
@@ -910,8 +909,8 @@ impl SuiClient {
         ptb: ProgrammableTransactionBuilder,
         gas_budget: u64,
     ) -> Result<()> {
-        eprintln!("sui: Executing programmable transaction...");
-        eprintln!("  Selecting gas coins for budget: {} MIST", gas_budget);
+        tracing::debug!("sui: Executing programmable transaction...");
+        tracing::debug!("  Selecting gas coins for budget: {} MIST", gas_budget);
         // 1. Select enough gas coins to cover the budget
         let coins = self
             .client
@@ -945,7 +944,7 @@ impl SuiClient {
             anyhow::bail!("No gas coins available for sender");
         }
 
-        eprintln!("  Fetching current gas price...");
+        tracing::debug!("  Fetching current gas price...");
         // 2. Get current gas price
         let gas_price = self
             .client
@@ -967,21 +966,21 @@ impl SuiClient {
         );
 
         // 4. Sign transaction with keystore
-        eprintln!("  Signing transaction with address: {}", self.sender);
+        tracing::debug!("  Signing transaction with address: {}", self.sender);
         let signature: Signature = self
             .sui_client_config
             .keystore
             .sign_secure(&self.sender, &tx_data, Intent::sui_transaction())
             .await
             .context("Failed to sign transaction")?;
-        eprintln!("  Transaction signed successfully");
+        tracing::debug!("  Transaction signed successfully");
 
         // 5. Create signed transaction
         let transaction = Transaction::from_data(tx_data, vec![signature]);
 
         // 6. Execute transaction
         // Use WaitForEffectsCert for faster response (doesn't wait for local execution)
-        eprintln!("  Executing transaction on-chain [gas_coin_count={gas_coin_count}]...");
+        tracing::info!("  Executing transaction on-chain [gas_coin_count={gas_coin_count}]...");
         let start = Instant::now();
         let response = self
             .client
@@ -1008,7 +1007,7 @@ impl SuiClient {
             }
         }
 
-        eprintln!(
+        tracing::info!(
             "sui: Transaction executed successfully: {}",
             response.digest
         );
@@ -1075,7 +1074,7 @@ impl SuiClient {
         );
 
         // 4. Sign transaction with keystore
-        eprintln!("  Signing transaction with address: {}", self.sender);
+        tracing::debug!("  Signing transaction with address: {}", self.sender);
         let signature: Signature = self
             .sui_client_config
             .keystore
@@ -1124,7 +1123,7 @@ impl SuiClient {
                     .to_string()
                     .contains("remote_state::RemoteState")
                 {
-                    eprintln!("sui: RemoteState created: {}", object_id.to_hex_literal());
+                    tracing::info!("sui: RemoteState created: {}", object_id.to_hex_literal());
                     return Ok(object_id);
                 }
             }

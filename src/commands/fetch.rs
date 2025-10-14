@@ -19,7 +19,7 @@ pub fn handle<S: StorageBackend, W: Write>(
     output: &mut W,
     refs: &[String],
 ) -> Result<()> {
-    eprintln!("git-remote-walrus: Fetch requested for refs: {:?}", refs);
+    tracing::info!("Fetch requested for refs: {:?}", refs);
 
     // Create packfile in memory
     let mut packfile = Vec::new();
@@ -56,7 +56,7 @@ pub fn handle<S: StorageBackend, W: Write>(
         .context("Failed to wait for git index-pack")?;
 
     if !result.status.success() {
-        eprintln!(
+        tracing::error!(
             "git index-pack stderr: {}",
             String::from_utf8_lossy(&result.stderr)
         );
@@ -66,11 +66,11 @@ pub fn handle<S: StorageBackend, W: Write>(
         );
     }
 
-    eprintln!(
+    tracing::debug!(
         "git index-pack output: {}",
         String::from_utf8_lossy(&result.stdout)
     );
-    eprintln!(
+    tracing::debug!(
         "git index-pack stderr: {}",
         String::from_utf8_lossy(&result.stderr)
     );
@@ -79,6 +79,6 @@ pub fn handle<S: StorageBackend, W: Write>(
     writeln!(output)?;
     output.flush()?;
 
-    eprintln!("git-remote-walrus: Fetch completed");
+    tracing::info!("Fetch completed");
     Ok(())
 }

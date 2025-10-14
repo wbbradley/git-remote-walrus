@@ -51,7 +51,7 @@ module walrus_remote::remote_state {
     public fun share_with_allowlist(
         mut state: RemoteState,
         initial_allowlist: vector<address>,
-        ctx: &TxContext,
+        ctx: &mut TxContext,
     ) {
         // Only owner can share
         assert!(state.owner == ctx.sender(), ERR_NOT_OWNER);
@@ -71,11 +71,11 @@ module walrus_remote::remote_state {
     }
 
     /// Acquire lock with timeout (typically 5 minutes = 300000ms)
-    public entry fun acquire_lock(
+    public fun acquire_lock(
         state: &mut RemoteState,
         clock: &Clock,
         lock_timeout_ms: u64,
-        ctx: &TxContext,
+        ctx: &mut TxContext,
     ) {
         check_authorized(state, ctx);
 
@@ -98,7 +98,7 @@ module walrus_remote::remote_state {
     }
 
     /// Release lock (caller must be lock holder)
-    public fun release_lock(state: &mut RemoteState, ctx: &TxContext) {
+    public fun release_lock(state: &mut RemoteState, ctx: &mut TxContext) {
         assert!(option::is_some(&state.lock), ERR_NO_LOCK);
 
         let lock = option::borrow(&state.lock);
@@ -112,7 +112,7 @@ module walrus_remote::remote_state {
         state: &mut RemoteState,
         ref_name: String,
         git_sha1: String,
-        ctx: &TxContext,
+        ctx: &mut TxContext,
     ) {
         check_authorized(state, ctx);
 
@@ -125,7 +125,7 @@ module walrus_remote::remote_state {
     }
 
     /// Delete a ref
-    public fun delete_ref(state: &mut RemoteState, ref_name: String, ctx: &TxContext) {
+    public fun delete_ref(state: &mut RemoteState, ref_name: String, ctx: &mut TxContext) {
         check_authorized(state, ctx);
 
         if (table::contains(&state.refs, ref_name)) {
@@ -138,14 +138,14 @@ module walrus_remote::remote_state {
         state: &mut RemoteState,
         blob_id: String,
         clock: &Clock,
-        ctx: &TxContext,
+        ctx: &mut TxContext,
     ) {
         check_lock_held(state, clock, ctx);
         option::swap_or_fill(&mut state.objects_blob_id, blob_id);
     }
 
     /// Add address to allowlist (owner only)
-    public fun add_to_allowlist(state: &mut RemoteState, address_to_add: address, ctx: &TxContext) {
+    public fun add_to_allowlist(state: &mut RemoteState, address_to_add: address, ctx: &mut TxContext) {
         assert!(state.owner == ctx.sender(), ERR_NOT_OWNER);
 
         if (option::is_none(&state.allowlist)) {
@@ -162,7 +162,7 @@ module walrus_remote::remote_state {
     public fun remove_from_allowlist(
         state: &mut RemoteState,
         address_to_remove: address,
-        ctx: &TxContext,
+        ctx: &mut TxContext,
     ) {
         assert!(state.owner == ctx.sender(), ERR_NOT_OWNER);
 

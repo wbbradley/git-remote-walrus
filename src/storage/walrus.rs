@@ -123,7 +123,7 @@ impl WalrusStorage {
 
     /// Check for blob expiration warnings and emit to stderr
     fn check_blob_expiration(&self) -> Result<()> {
-        eprintln!("git-remote-walrus: Checking blob expiration...");
+        tracing::debug!("Checking blob expiration...");
         let tracker = self.load_blob_tracker()?;
 
         if tracker.count() == 0 {
@@ -134,8 +134,8 @@ impl WalrusStorage {
         let current_epoch = match self.walrus_client.current_epoch() {
             Ok(info) => info.current_epoch,
             Err(e) => {
-                eprintln!(
-                    "git-remote-walrus: Warning: Failed to get current Walrus epoch: {}",
+                tracing::warn!(
+                    "Failed to get current Walrus epoch: {}",
                     e
                 );
                 return Ok(());
@@ -147,24 +147,24 @@ impl WalrusStorage {
             .check_expiration_warning(current_epoch, self.config.expiration_warning_threshold);
 
         if should_warn {
-            eprintln!(
-                "git-remote-walrus: ⚠️  WARNING: {} blob(s) expiring soon!",
+            tracing::warn!(
+                "WARNING: {} blob(s) expiring soon!",
                 expiring_soon.len()
             );
-            eprintln!("  Current Walrus epoch: {}", current_epoch);
-            eprintln!(
+            tracing::warn!("  Current Walrus epoch: {}", current_epoch);
+            tracing::warn!(
                 "  Warning threshold: {} epochs",
                 self.config.expiration_warning_threshold
             );
 
             if let Some(min) = min_epoch {
-                eprintln!("  Earliest expiration: epoch {}", min);
+                tracing::warn!("  Earliest expiration: epoch {}", min);
             }
 
             // List expiring blobs
             for blob in expiring_soon.iter().take(5) {
                 let epochs_remaining = blob.end_epoch.saturating_sub(current_epoch);
-                eprintln!(
+                tracing::warn!(
                     "    - {} expires in {} epoch(s)",
                     &blob.blob_id[..16],
                     epochs_remaining
@@ -172,14 +172,14 @@ impl WalrusStorage {
             }
 
             if expiring_soon.len() > 5 {
-                eprintln!("    ... and {} more", expiring_soon.len() - 5);
+                tracing::warn!("    ... and {} more", expiring_soon.len() - 5);
             }
 
-            eprintln!(
+            tracing::warn!(
                 "  Action required: Re-upload expiring blobs or repository may become inaccessible"
             );
         } else {
-            eprintln!("git-remote-walrus: Tracking {} blob(s), earliest expiration at epoch {} (current: {})",
+            tracing::info!("Tracking {} blob(s), earliest expiration at epoch {} (current: {})",
                      tracker.count(), min_epoch.unwrap_or(0), current_epoch);
         }
 
@@ -196,8 +196,8 @@ impl ImmutableStore for WalrusStorage {
 
         if let Some(object_id) = cache_index.get_object_id(&sha256) {
             // Already cached, return object_id
-            eprintln!(
-                "git-remote-walrus: Object '{}...' already cached as '{}...'",
+            tracing::debug!(
+                "Object '{}...' already cached as '{}...'",
                 &sha256[..8],
                 &object_id[..16]
             );
@@ -205,8 +205,8 @@ impl ImmutableStore for WalrusStorage {
         }
 
         // 2. Upload to Walrus
-        eprintln!(
-            "git-remote-walrus: Uploading object '{}...' ({} bytes)",
+        tracing::info!(
+            "Uploading object '{}...' ({} bytes)",
             &sha256[..8],
             content.len()
         );
@@ -240,8 +240,8 @@ impl ImmutableStore for WalrusStorage {
                 self.save_blob_tracker(&tracker)?;
             }
             Err(e) => {
-                eprintln!(
-                    "git-remote-walrus: Warning: Failed to get blob status from Sui: {} [shared_object_id: {}]",
+                tracing::warn!(
+                    "Failed to get blob status from Sui: {} [shared_object_id: {}]",
                     e, blob_info.shared_object_id
                 );
             }
@@ -268,19 +268,19 @@ impl ImmutableStore for WalrusStorage {
             // Try cache hit
             match self.cache.read_object(sha256) {
                 Ok(content) => {
-                    eprintln!("git-remote-walrus: Cache hit for {}", &id[..16]);
+                    tracing::debug!("Cache hit for {}", &id[..16]);
                     return Ok(content);
                 }
                 Err(_) => {
                     // Cache miss, continue to Walrus
-                    eprintln!("git-remote-walrus: Cache miss for {}", &id[..16]);
+                    tracing::debug!("Cache miss for {}", &id[..16]);
                 }
             }
         }
 
         // 2. Get blob_id from Sui object
-        eprintln!(
-            "git-remote-walrus: Querying Sui for blob_id (object: {})",
+        tracing::debug!(
+            "Querying Sui for blob_id (object: {})",
             &id[..16]
         );
         let blob_status = self
@@ -289,8 +289,8 @@ impl ImmutableStore for WalrusStorage {
             .with_context(|| format!("Failed to get SharedBlob status for object {}", id))?;
 
         // 3. Read from Walrus using blob_id
-        eprintln!(
-            "git-remote-walrus: Downloading from Walrus: {}",
+        tracing::info!(
+            "Downloading from Walrus: {}",
             &blob_status.blob_id[..16]
         );
         let content = self
@@ -350,7 +350,7 @@ impl ImmutableStore for WalrusStorage {
 
 impl MutableState for WalrusStorage {
     fn read_state(&self) -> Result<State> {
-        eprintln!(
+        tracing::info!(
             "git-remote-walrus: Reading state from {}",
             &self.state_object_id
         );
@@ -361,7 +361,7 @@ impl MutableState for WalrusStorage {
             .block_on(self.sui_client.read_refs())
             .context("Failed to read refs from Sui")?;
 
-        eprintln!("  Retrieved {} refs from Sui", refs.len());
+        tracing::info!("  Retrieved {} refs from Sui", refs.len());
 
         // Get objects_blob_id (object_id) from Sui
         let objects_object_id = self
@@ -371,7 +371,7 @@ impl MutableState for WalrusStorage {
 
         // Download objects map from Walrus if it exists
         let objects = if let Some(object_id) = objects_object_id {
-            eprintln!(
+            tracing::info!(
                 "  Downloading objects map from Walrus (object_id: {})",
                 &object_id
             );
@@ -399,17 +399,17 @@ impl MutableState for WalrusStorage {
                 })?;
             serde_yaml::from_slice(&objects_yaml).context("Failed to parse objects map YAML")?
         } else {
-            eprintln!("  No objects object ID found, starting with empty objects map");
+            tracing::info!("  No objects object ID found, starting with empty objects map");
             BTreeMap::new()
         };
 
-        eprintln!("  Retrieved {} objects mappings", objects.len());
+        tracing::info!("  Retrieved {} objects mappings", objects.len());
 
         Ok(State { refs, objects })
     }
 
     fn write_state(&self, state: &State) -> Result<()> {
-        eprintln!(
+        tracing::info!(
             "git-remote-walrus: Writing state to {} ({} refs, {} objects)",
             self.state_object_id,
             state.refs.len(),
@@ -421,18 +421,18 @@ impl MutableState for WalrusStorage {
 
         // Step 1: Acquire lock on RemoteState (5 minute timeout)
         // This ensures no one else can modify the state while we upload to Walrus
-        eprintln!("  Acquiring lock on RemoteState...");
+        tracing::info!("  Acquiring lock on RemoteState...");
         self.runtime
             .block_on(self.sui_client.acquire_lock(300_000))
             .context("Failed to acquire lock on RemoteState")?;
 
         // Step 2: Serialize and upload objects map to Walrus (while holding lock)
-        eprintln!("  Serializing objects map...");
+        tracing::info!("  Serializing objects map...");
         let objects_yaml_str = serde_yaml::to_string(&state.objects)
             .context("Failed to serialize objects map to YAML")?;
         let objects_yaml = objects_yaml_str.as_bytes();
 
-        eprintln!(
+        tracing::info!(
             "  Uploading objects map to Walrus ({} bytes)...",
             objects_yaml.len()
         );
@@ -441,7 +441,7 @@ impl MutableState for WalrusStorage {
             .store(objects_yaml)
             .context("Failed to upload objects map to Walrus")?;
 
-        eprintln!(
+        tracing::info!(
             "  Objects shared object ID: {} (blob: {})",
             &objects_blob_info.shared_object_id,
             &objects_blob_info.blob_id
@@ -455,7 +455,7 @@ impl MutableState for WalrusStorage {
             .collect();
 
         // Step 4: Execute atomic PTB: update refs + update objects_blob_id + release lock
-        eprintln!(
+        tracing::info!(
             "  Executing atomic PTB (update {} refs + objects object + release lock)...",
             refs.len()
         );
@@ -466,7 +466,7 @@ impl MutableState for WalrusStorage {
             )
             .context("Failed to execute atomic PTB")?;
 
-        eprintln!("  State successfully written to Sui");
+        tracing::info!("  State successfully written to Sui");
 
         Ok(())
     }
@@ -485,10 +485,10 @@ impl MutableState for WalrusStorage {
 
 impl StorageBackend for WalrusStorage {
     fn initialize(&self) -> Result<()> {
-        eprintln!("git-remote-walrus: Initializing Walrus storage");
-        eprintln!("  State object: {}", self.state_object_id);
-        eprintln!("  Cache dir: {:?}", self.config.cache_dir);
-        eprintln!("  Wallet: {:?}", self.config.sui_wallet_path);
+        tracing::info!("git-remote-walrus: Initializing Walrus storage");
+        tracing::info!("  State object: {}", self.state_object_id);
+        tracing::info!("  Cache dir: {:?}", self.config.cache_dir);
+        tracing::info!("  Wallet: {:?}", self.config.sui_wallet_path);
 
         // Initialize cache
         self.cache

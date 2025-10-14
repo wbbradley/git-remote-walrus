@@ -25,7 +25,7 @@ pub fn handle<S: StorageBackend, W: Write, R: BufRead>(
         let line = line?;
         let line_trimmed = line.trim();
 
-        eprintln!("Push line: '{}'", line_trimmed);
+        tracing::debug!("Push line: '{}'", line_trimmed);
 
         if line_trimmed.is_empty() {
             break;
@@ -37,7 +37,7 @@ pub fn handle<S: StorageBackend, W: Write, R: BufRead>(
             if parts.len() == 2 {
                 let src = parts[0].to_string();
                 let dst = parts[1].to_string();
-                eprintln!("Parsed ref update: {} -> {}", src, dst);
+                tracing::debug!("Parsed ref update: {} -> {}", src, dst);
                 ref_updates.push((src, dst));
             }
         } else {
@@ -46,24 +46,24 @@ pub fn handle<S: StorageBackend, W: Write, R: BufRead>(
             if parts.len() == 2 {
                 let src = parts[0].to_string();
                 let dst = parts[1].to_string();
-                eprintln!("Parsed ref update (no prefix): {} -> {}", src, dst);
+                tracing::debug!("Parsed ref update (no prefix): {} -> {}", src, dst);
                 ref_updates.push((src, dst));
             }
         }
     }
 
     if ref_updates.is_empty() {
-        eprintln!("No refs to push");
+        tracing::info!("No refs to push");
         writeln!(output)?;
         return Ok(());
     }
 
     // Receive packfile from stdin
-    eprintln!("Receiving packfile...");
+    tracing::info!("Receiving packfile...");
     let mut stdin = std::io::stdin();
     let object_mappings = receive_pack(&mut stdin, storage).context("Failed to receive pack")?;
 
-    eprintln!("Stored {} objects", object_mappings.len());
+    tracing::info!("Stored {} objects", object_mappings.len());
 
     // Update state with new objects and refs
     storage.update_state(|state| {
@@ -82,7 +82,7 @@ pub fn handle<S: StorageBackend, W: Write, R: BufRead>(
             // In a real implementation, Git sends the old/new SHAs
             if let Some((obj_id, _)) = object_mappings.first() {
                 state.refs.insert(dst.clone(), obj_id.clone());
-                eprintln!("Updated ref {} to {}", dst, obj_id);
+                tracing::debug!("Updated ref {} to {}", dst, obj_id);
             }
         }
 
@@ -95,7 +95,7 @@ pub fn handle<S: StorageBackend, W: Write, R: BufRead>(
     }
 
     writeln!(output)?; // Empty line signals completion
-    eprintln!("Push completed");
+    tracing::info!("Push completed");
 
     Ok(())
 }

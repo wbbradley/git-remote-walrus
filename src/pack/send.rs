@@ -30,10 +30,10 @@ pub fn send_pack<W: Write>(
 
     // Collect object IDs for all wanted refs
     let wanted_objects = collect_wanted_objects(wanted_refs, &state)?;
-    eprintln!("Need to send {} objects", wanted_objects.len());
+    tracing::info!("Need to send {} objects", wanted_objects.len());
 
     if wanted_objects.is_empty() {
-        eprintln!("No objects to send");
+        tracing::info!("No objects to send");
         return Ok(());
     }
 
@@ -64,7 +64,7 @@ pub fn send_pack<W: Write>(
         write_loose_object(&obj, &objects_dir)
             .with_context(|| format!("Failed to write loose object {}", obj_id))?;
 
-        eprintln!("Wrote object {} to temp repo", obj_id);
+        tracing::debug!("Wrote object {} to temp repo", obj_id);
     }
 
     // Create packfile using git pack-objects
@@ -145,7 +145,7 @@ fn create_packfile<W: Write>(
         .context("Failed to wait for git pack-objects")?;
 
     if !pack_output.status.success() {
-        eprintln!(
+        tracing::error!(
             "git pack-objects stderr: {}",
             String::from_utf8_lossy(&pack_output.stderr)
         );
@@ -160,7 +160,7 @@ fn create_packfile<W: Write>(
         .write_all(&pack_output.stdout)
         .context("Failed to write packfile to output")?;
 
-    eprintln!(
+    tracing::info!(
         "Packfile created successfully ({} bytes)",
         pack_output.stdout.len()
     );

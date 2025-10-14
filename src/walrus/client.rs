@@ -97,16 +97,14 @@ impl WalrusClient {
 
         // Parse JSON output to extract blob info (object_id and blob_id)
         let stdout = String::from_utf8_lossy(&output.stdout);
-        //eprintln!("walrus: Full JSON output from store command:");
-        //eprintln!("{}", stdout);
         let blob_info = self.parse_blob_info(&stdout)?;
-        eprintln!(
-            "walrus: Parsed blob_info - shared_object_id: {}, blob_id: {}",
+        tracing::debug!(
+            "Parsed blob_info - shared_object_id: {}, blob_id: {}",
             blob_info.shared_object_id, blob_info.blob_id
         );
 
-        eprintln!(
-            "walrus: Stored blob {} at shared object {} (expires in {} epochs)",
+        tracing::info!(
+            "Stored blob {} at shared object {} (expires in {} epochs)",
             &blob_info.blob_id, &blob_info.shared_object_id, epochs
         );
 

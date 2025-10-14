@@ -37,7 +37,7 @@ pub fn receive_pack<R: Read>(
         .read_to_end(&mut pack_data)
         .context("Failed to read packfile from stdin")?;
 
-    eprintln!("Received pack of {} bytes", pack_data.len());
+    tracing::info!("Received pack of {} bytes", pack_data.len());
 
     // Unpack using git unpack-objects (creates loose objects, not a pack)
     let mut unpack = Command::new("git")
@@ -63,11 +63,11 @@ pub fn receive_pack<R: Read>(
         .context("Failed to wait for git unpack-objects")?;
 
     if !output.status.success() {
-        eprintln!(
+        tracing::error!(
             "git unpack-objects stdout: {}",
             String::from_utf8_lossy(&output.stdout)
         );
-        eprintln!(
+        tracing::error!(
             "git unpack-objects stderr: {}",
             String::from_utf8_lossy(&output.stderr)
         );
@@ -75,14 +75,14 @@ pub fn receive_pack<R: Read>(
     }
 
     // Log the unpack-objects output to stderr
-    eprintln!(
+    tracing::debug!(
         "git unpack-objects: {}",
         String::from_utf8_lossy(&output.stderr)
     );
 
     // Collect all unpacked objects from .git/objects
     let objects = collect_loose_objects(&git_dir)?;
-    eprintln!("Unpacked {} objects", objects.len());
+    tracing::info!("Unpacked {} objects", objects.len());
 
     // Store each object in immutable storage
     let mut mappings = Vec::new();
@@ -92,7 +92,7 @@ pub fn receive_pack<R: Read>(
             .write_object(&content)
             .with_context(|| format!("Failed to store object {}", obj.id))?;
 
-        eprintln!("Stored object {} -> {}", obj.id, content_id);
+        tracing::debug!("Stored object {} -> {}", obj.id, content_id);
         mappings.push((obj.id, content_id));
     }
 
@@ -151,8 +151,8 @@ fn collect_loose_objects(git_dir: &std::path::Path) -> Result<Vec<GitObject>> {
             match read_loose_object(&obj_path) {
                 Ok(obj) => objects.push(obj),
                 Err(e) => {
-                    eprintln!(
-                        "Warning: Failed to read object {}: {}",
+                    tracing::warn!(
+                        "Failed to read object {}: {}",
                         obj_path.display(),
                         e
                     );

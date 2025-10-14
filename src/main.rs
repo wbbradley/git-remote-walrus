@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 mod commands;
 mod config;
@@ -149,6 +150,15 @@ impl StorageBackend for Storage {
 }
 
 fn main() -> Result<()> {
+    // Initialize tracing subscriber
+    tracing_subscriber::registry()
+        .with(fmt::layer().with_writer(std::io::stderr))
+        .with(
+            EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| EnvFilter::new("git_remote_walrus=info"))
+        )
+        .init();
+
     let cli = Cli::parse();
 
     match cli.command {
@@ -171,12 +181,12 @@ fn main() -> Result<()> {
             // Initialize storage backend based on type
             let storage = match remote_type {
                 RemoteType::Filesystem(path) => {
-                    eprintln!("git-remote-walrus: Using filesystem storage: {:?}", path);
+                    tracing::info!("Using filesystem storage: {:?}", path);
                     let fs_storage = FilesystemStorage::new(path)?;
                     Storage::Filesystem(fs_storage)
                 }
                 RemoteType::Sui(object_id) => {
-                    eprintln!("git-remote-walrus: Using Walrus+Sui storage: {}", object_id);
+                    tracing::info!("Using Walrus+Sui storage: {}", object_id);
                     let walrus_storage = WalrusStorage::new(object_id)?;
                     Storage::Walrus(Box::new(walrus_storage))
                 }
@@ -193,7 +203,7 @@ fn main() -> Result<()> {
 }
 
 fn parse_remote_url(url: &str) -> Result<RemoteType> {
-    eprintln!("git-remote-walrus: Parsing URL: '{}'", url);
+    tracing::debug!("Parsing URL: '{}'", url);
 
     // Git strips the protocol prefix, so we might receive either:
     // - "walrus::/path/to/storage" (user-specified format)
@@ -216,17 +226,17 @@ fn parse_remote_url(url: &str) -> Result<RemoteType> {
 }
 
 fn handle_deploy() -> Result<()> {
-    eprintln!("git-remote-walrus: Deploying Move package to Sui...\n");
+    tracing::info!("Deploying Move package to Sui...\n");
 
     // Load configuration
     let config = config::WalrusRemoteConfig::load()?;
 
-    eprintln!(
+    tracing::info!(
         "Hint: You can run `sui client --client.config {} faucet` to get test SUI if you are on a localnet.",
         config.sui_wallet_path.display()
     );
-    eprintln!("Configuration:");
-    eprintln!("  Wallet: {:?}\n", config.sui_wallet_path);
+    tracing::info!("Configuration:");
+    tracing::info!("  Wallet: {:?}\n", config.sui_wallet_path);
 
     // Get the move package directory
     let move_package_dir = std::env::current_dir()?.join("move").join("walrus_remote");
@@ -240,7 +250,7 @@ fn handle_deploy() -> Result<()> {
     }
 
     // Step 1: Build the Move package
-    eprintln!("Step 1/2: Building Move package...");
+    tracing::info!("Step 1/2: Building Move package...");
     let build_output = std::process::Command::new("sui")
         .arg("move")
         .arg("build")
@@ -253,10 +263,10 @@ fn handle_deploy() -> Result<()> {
         anyhow::bail!("Move build failed:\n{}", stderr);
     }
 
-    eprintln!("✓ Move package built successfully\n");
+    tracing::info!("✓ Move package built successfully\n");
 
     // Step 2: Publish the package
-    eprintln!("Step 2/2: Publishing to Sui...");
+    tracing::info!("Step 2/2: Publishing to Sui...");
     let publish_output = std::process::Command::new("sui")
         .arg("client")
         .arg("--client.config")
@@ -297,15 +307,15 @@ fn handle_deploy() -> Result<()> {
     let package_id = package_id
         .ok_or_else(|| anyhow::anyhow!("Failed to extract package ID from publish output"))?;
 
-    eprintln!("✓ Package published successfully\n");
-    eprintln!("Package ID: {}\n", package_id);
+    tracing::info!("✓ Package published successfully\n");
+    tracing::info!("Package ID: {}\n", package_id);
 
     // Print next steps
-    eprintln!("Next steps:");
-    eprintln!("  1. Create a remote:");
-    eprintln!("       git-remote-walrus init {}", package_id);
-    eprintln!("     Or for a shared remote:");
-    eprintln!(
+    tracing::info!("Next steps:");
+    tracing::info!("  1. Create a remote:");
+    tracing::info!("       git-remote-walrus init {}", package_id);
+    tracing::info!("     Or for a shared remote:");
+    tracing::info!(
         "       git-remote-walrus init {} --shared --allow <address>",
         package_id
     );
@@ -314,45 +324,45 @@ fn handle_deploy() -> Result<()> {
 }
 
 fn handle_init(package_id: String, shared: bool, allowlist: Vec<String>) -> Result<()> {
-    eprintln!("git-remote-walrus: Creating new remote...");
-    eprintln!("  Package ID: {}", package_id);
-    eprintln!("  Shared: {}", shared);
+    tracing::info!("Creating new remote...");
+    tracing::info!("  Package ID: {}", package_id);
+    tracing::info!("  Shared: {}", shared);
     if !allowlist.is_empty() {
-        eprintln!("  Allowlist: {:?}", allowlist);
+        tracing::info!("  Allowlist: {:?}", allowlist);
     }
 
     // Load configuration for RPC URL and wallet path
     let config = config::WalrusRemoteConfig::load()?;
 
-    eprintln!("  Wallet: {:?}", config.sui_wallet_path);
+    tracing::info!("  Wallet: {:?}", config.sui_wallet_path);
 
     // Create async runtime for Sui operations
     let runtime = tokio::runtime::Runtime::new()?;
 
     runtime.block_on(async {
         // Create Sui client
-        eprintln!("\nInitializing Sui client...");
+        tracing::info!("\nInitializing Sui client...");
         let sui_client = sui::SuiClient::new_for_init(package_id, config.sui_wallet_path).await?;
 
         // Create RemoteState object
-        eprintln!("Creating RemoteState object...");
+        tracing::info!("Creating RemoteState object...");
         let object_id = sui_client.create_remote().await?;
-        eprintln!("✓ RemoteState created: {}", object_id);
+        tracing::info!("✓ RemoteState created: {}", object_id);
 
         // Share if requested
         if shared {
-            eprintln!("\nConverting to shared object...");
+            tracing::info!("\nConverting to shared object...");
             sui_client
                 .share_remote(object_id.clone(), allowlist)
                 .await?;
-            eprintln!("✓ RemoteState is now shared");
+            tracing::info!("✓ RemoteState is now shared");
         }
 
         // Print instructions
-        eprintln!("\n✓ Success! Your git remote is ready.");
-        eprintln!("\nTo use this remote:");
-        eprintln!("  git remote add storage walrus::{}", object_id);
-        eprintln!("  git push storage main");
+        tracing::info!("\n✓ Success! Your git remote is ready.");
+        tracing::info!("\nTo use this remote:");
+        tracing::info!("  git remote add storage walrus::{}", object_id);
+        tracing::info!("  git push storage main");
 
         Ok(())
     })
@@ -365,7 +375,7 @@ fn handle_config(edit: bool) -> Result<()> {
         // Open config file in $EDITOR
         let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".to_string());
 
-        eprintln!("Opening config file in {}: {:?}", editor, config_path);
+        tracing::info!("Opening config file in {}: {:?}", editor, config_path);
 
         let status = std::process::Command::new(&editor)
             .arg(&config_path)

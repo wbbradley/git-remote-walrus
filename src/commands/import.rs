@@ -18,7 +18,7 @@ pub fn handle<S: StorageBackend, W: Write>(
     output: &mut W,
     refs: &[String],
 ) -> Result<()> {
-    eprintln!("git-remote-walrus: Import requested for refs: {:?}", refs);
+    tracing::info!("Import requested for refs: {:?}", refs);
 
     let state = storage.read_state()?;
 
@@ -48,7 +48,7 @@ pub fn handle<S: StorageBackend, W: Write>(
             let ref_path = git_dir.join(ref_name);
             std::fs::create_dir_all(ref_path.parent().unwrap())?;
             std::fs::write(&ref_path, format!("{}\n", commit_id))?;
-            eprintln!("Created ref {} -> {}", ref_name, commit_id);
+            tracing::debug!("Created ref {} -> {}", ref_name, commit_id);
         }
     }
 
@@ -68,7 +68,7 @@ pub fn handle<S: StorageBackend, W: Write>(
         .context("Failed to wait for git fast-export")?;
 
     if !export_output.status.success() {
-        eprintln!(
+        tracing::error!(
             "git fast-export stderr: {}",
             String::from_utf8_lossy(&export_output.stderr)
         );

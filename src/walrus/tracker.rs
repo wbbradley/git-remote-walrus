@@ -40,7 +40,7 @@ impl BlobTracker {
 
     /// Load blob tracker from file
     pub fn load(path: &Path) -> Result<Self> {
-        eprintln!("git-remote-walrus: Loading blob tracker from {:?}", path);
+        tracing::debug!("Loading blob tracker from {:?}", path);
         if !path.exists() {
             return Ok(Self::default());
         }
