@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{cell::RefCell, collections::BTreeMap, path::PathBuf};
 
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
@@ -44,6 +44,10 @@ pub struct WalrusStorage {
 
     /// Blob tracker path
     blob_tracker_path: PathBuf,
+
+    /// Cached state to avoid redundant reads during single operation
+    /// (e.g., list followed by fetch both need state)
+    cached_state: RefCell<Option<State>>,
 }
 
 impl WalrusStorage {
@@ -87,6 +91,7 @@ impl WalrusStorage {
             runtime,
             cache_index_path,
             blob_tracker_path,
+            cached_state: RefCell::new(None),
         })
     }
 
@@ -350,6 +355,16 @@ impl ImmutableStore for WalrusStorage {
 
 impl MutableState for WalrusStorage {
     fn read_state(&self) -> Result<State> {
+        // Check if we have a cached state
+        if let Some(cached) = self.cached_state.borrow().as_ref() {
+            tracing::debug!(
+                "git-remote-walrus: Using cached state ({} refs, {} objects)",
+                cached.refs.len(),
+                cached.objects.len()
+            );
+            return Ok(cached.clone());
+        }
+
         tracing::info!(
             "git-remote-walrus: Reading state from {}",
             &self.state_object_id
@@ -405,7 +420,12 @@ impl MutableState for WalrusStorage {
 
         tracing::info!("  Retrieved {} objects mappings", objects.len());
 
-        Ok(State { refs, objects })
+        let state = State { refs, objects };
+
+        // Cache the state for subsequent reads
+        *self.cached_state.borrow_mut() = Some(state.clone());
+
+        Ok(state)
     }
 
     fn write_state(&self, state: &State) -> Result<()> {
@@ -415,6 +435,9 @@ impl MutableState for WalrusStorage {
             state.refs.len(),
             state.objects.len()
         );
+
+        // Invalidate cached state since we're writing new state
+        *self.cached_state.borrow_mut() = None;
 
         // Check for blob expiration warnings
         let _ = self.check_blob_expiration();
