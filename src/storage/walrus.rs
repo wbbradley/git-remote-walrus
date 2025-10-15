@@ -1,6 +1,7 @@
 use std::{cell::RefCell, collections::BTreeMap, path::PathBuf};
 
 use anyhow::{Context, Result};
+use indicatif::{ProgressBar, ProgressStyle};
 use sha2::{Digest, Sha256};
 
 use super::{
@@ -164,19 +165,58 @@ impl WalrusStorage {
         // Load current tracker to check what we already have
         let mut tracker = self.load_blob_tracker()?;
 
-        // Query Sui for blob statuses we don't already have
-        let mut discovered_count = 0;
-        for blob_object_id in blob_object_ids {
-            // Skip if we already track this blob
-            if tracker.get_blob(&blob_object_id).is_some() {
-                continue;
-            }
+        // Filter to only blob_object_ids we don't already have
+        let blobs_to_query: Vec<String> = blob_object_ids
+            .into_iter()
+            .filter(|blob_id| tracker.get_blob(blob_id).is_none())
+            .collect();
 
-            // Query Sui for this blob's status
-            match self
-                .runtime
-                .block_on(self.sui_client.get_shared_blob_status(&blob_object_id))
-            {
+        if blobs_to_query.is_empty() {
+            tracing::debug!("  All blobs already tracked");
+            return Ok(());
+        }
+
+        tracing::info!("  Querying Sui for {} new blob(s)...", blobs_to_query.len());
+
+        // Create progress bar for batch queries
+        let pb = if blobs_to_query.len() > 10 {
+            let bar = ProgressBar::new(blobs_to_query.len() as u64);
+            bar.set_style(
+                ProgressStyle::default_bar()
+                    .template("  {msg} [{bar:40.cyan/blue}] {pos}/{len} blobs ({eta})")
+                    .expect("Failed to create progress template")
+                    .progress_chars("█▓░"),
+            );
+            bar.set_message("Querying blob statuses");
+            Some(bar)
+        } else {
+            None
+        };
+
+        // Batch query Sui for all blob statuses with progress tracking
+        let results = {
+            let pb_clone = pb.clone();
+            self.runtime.block_on(
+                self.sui_client
+                    .get_shared_blob_statuses_batch(&blobs_to_query, Some(move |count| {
+                        if let Some(ref bar) = pb_clone {
+                            bar.inc(count as u64);
+                        }
+                    })),
+            )?
+        };
+
+        // Finish progress bar
+        if let Some(ref bar) = pb {
+            bar.finish_with_message("Blob query complete");
+        }
+
+        // Process results
+        let mut discovered_count = 0;
+        let mut failed_count = 0;
+
+        for (i, result) in results.into_iter().enumerate() {
+            match result {
                 Ok(status) => {
                     tracker.track_blob(
                         status.object_id,
@@ -187,17 +227,22 @@ impl WalrusStorage {
                     discovered_count += 1;
                 }
                 Err(e) => {
+                    let blob_id = &blobs_to_query[i];
                     tracing::debug!(
                         "Could not get blob status for {}: {}",
-                        &blob_object_id[..std::cmp::min(blob_object_id.len(), 16)],
+                        &blob_id[..std::cmp::min(blob_id.len(), 16)],
                         e
                     );
+                    failed_count += 1;
                 }
             }
         }
 
         if discovered_count > 0 {
             tracing::info!("  Discovered {} new blob(s) for tracking", discovered_count);
+            if failed_count > 0 {
+                tracing::debug!("  Failed to query {} blob(s)", failed_count);
+            }
             self.save_blob_tracker(&tracker)?;
         }
 

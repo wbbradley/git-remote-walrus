@@ -557,6 +557,156 @@ impl SuiClient {
         }
     }
 
+    /// Batch query SharedBlob statuses from Sui with pagination
+    /// Returns results in the same order as input, with errors for individual failures
+    /// Chunks requests to avoid RPC limits (default: 50 objects per batch)
+    /// Calls progress_callback after each chunk if provided
+    pub async fn get_shared_blob_statuses_batch<F>(
+        &self,
+        object_ids: &[String],
+        mut progress_callback: Option<F>,
+    ) -> Result<Vec<Result<SharedBlobStatus>>>
+    where
+        F: FnMut(usize),
+    {
+        if object_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // RPC batch size limit - conservative to avoid hitting server limits
+        const BATCH_SIZE: usize = 50;
+
+        tracing::debug!(
+            "sui: Batch querying {} SharedBlob objects (chunk size: {})",
+            object_ids.len(),
+            BATCH_SIZE
+        );
+
+        let mut all_results = Vec::with_capacity(object_ids.len());
+
+        // Process in chunks to avoid RPC limits
+        for (chunk_idx, chunk) in object_ids.chunks(BATCH_SIZE).enumerate() {
+            if object_ids.len() > BATCH_SIZE {
+                tracing::debug!(
+                    "  Processing batch {}/{} ({} objects)",
+                    chunk_idx + 1,
+                    (object_ids.len() + BATCH_SIZE - 1) / BATCH_SIZE,
+                    chunk.len()
+                );
+            }
+
+            let chunk_results = self.query_blob_statuses_single_batch(chunk).await?;
+            all_results.extend(chunk_results);
+
+            // Call progress callback after processing this chunk
+            if let Some(ref mut callback) = progress_callback {
+                callback(chunk.len());
+            }
+        }
+
+        Ok(all_results)
+    }
+
+    /// Query a single batch of SharedBlob statuses (internal helper)
+    async fn query_blob_statuses_single_batch(
+        &self,
+        object_ids: &[String],
+    ) -> Result<Vec<Result<SharedBlobStatus>>> {
+        // Parse all object IDs
+        let parsed_ids: Result<Vec<ObjectID>> = object_ids
+            .iter()
+            .map(|id| {
+                ObjectID::from_hex_literal(id)
+                    .with_context(|| format!("Invalid object ID: {}", id))
+            })
+            .collect();
+        let parsed_ids = parsed_ids?;
+
+        // Batch query all objects in this chunk
+        let objects = self
+            .client
+            .read_api()
+            .multi_get_object_with_options(
+                parsed_ids.clone(),
+                SuiObjectDataOptions::new()
+                    .with_content()
+                    .with_bcs()
+                    .with_type()
+                    .with_owner(),
+            )
+            .await
+            .context("Failed to batch fetch SharedBlob objects")?;
+
+        // Process each result
+        let mut results = Vec::new();
+        for (i, object_response) in objects.into_iter().enumerate() {
+            let object_id_str = &object_ids[i];
+
+            let result = (|| -> Result<SharedBlobStatus> {
+                let data = object_response.data.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "SharedBlob object not found: {} (error: {:?})",
+                        object_id_str,
+                        object_response.error
+                    )
+                })?;
+
+                let content = data.content.ok_or_else(|| {
+                    anyhow::anyhow!("SharedBlob has no content: {}", object_id_str)
+                })?;
+
+                // Extract fields from the SharedBlob object
+                let move_obj = match content {
+                    SuiParsedData::MoveObject(obj) => obj,
+                    _ => anyhow::bail!("Expected MoveObject for SharedBlob"),
+                };
+
+                // Navigate to: content.fields.blob.fields
+                let blob_field = self
+                    .get_struct_field(&move_obj.fields, "blob")
+                    .context("Failed to get 'blob' field from SharedBlob")?;
+
+                let blob_struct = match blob_field {
+                    SuiMoveValue::Struct(s) => s,
+                    _ => anyhow::bail!("Expected Struct for blob field"),
+                };
+
+                // Extract blob_id (stored as u256 decimal, convert to base64)
+                let blob_id_value = self
+                    .get_struct_field(blob_struct, "blob_id")
+                    .context("Failed to get 'blob_id' field from Blob")?;
+                let blob_id_u256 = self.extract_string(blob_id_value)?;
+                let blob_id = parse_num_blob_id(&blob_id_u256)?;
+
+                // Navigate to: blob.fields.storage.fields
+                let storage_field = self
+                    .get_struct_field(blob_struct, "storage")
+                    .context("Failed to get 'storage' field from Blob")?;
+
+                let storage_struct = match storage_field {
+                    SuiMoveValue::Struct(s) => s,
+                    _ => anyhow::bail!("Expected Struct for storage field"),
+                };
+
+                // Extract end_epoch
+                let end_epoch_value = self
+                    .get_struct_field(storage_struct, "end_epoch")
+                    .context("Failed to get 'end_epoch' field from Storage")?;
+                let end_epoch = self.extract_u64(end_epoch_value)?;
+
+                Ok(SharedBlobStatus {
+                    object_id: object_id_str.to_string(),
+                    blob_id,
+                    end_epoch,
+                })
+            })();
+
+            results.push(result);
+        }
+
+        Ok(results)
+    }
+
     /// Get SharedBlob status from Sui
     /// Extracts object_id, blob_id, and end_epoch from a SharedBlob object
     pub async fn get_shared_blob_status(&self, object_id: &str) -> Result<SharedBlobStatus> {
