@@ -100,12 +100,15 @@ impl WalrusClient {
         let blob_info = self.parse_blob_info(&stdout)?;
         tracing::debug!(
             "Parsed blob_info - shared_object_id: {}, blob_id: {}",
-            blob_info.shared_object_id, blob_info.blob_id
+            blob_info.shared_object_id,
+            blob_info.blob_id
         );
 
         tracing::info!(
             "Stored blob {} at shared object {} (expires in {} epochs)",
-            &blob_info.blob_id, &blob_info.shared_object_id, epochs
+            &blob_info.blob_id,
+            &blob_info.shared_object_id,
+            epochs
         );
 
         Ok(blob_info)

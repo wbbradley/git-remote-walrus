@@ -86,10 +86,7 @@ pub fn receive_pack<R: Read>(
 
     // Store objects in immutable storage using batched write
     // Collect all object contents first
-    let contents_owned: Vec<Vec<u8>> = objects
-        .iter()
-        .map(|obj| obj.to_loose_format())
-        .collect();
+    let contents_owned: Vec<Vec<u8>> = objects.iter().map(|obj| obj.to_loose_format()).collect();
 
     // Create slice references for write_objects
     let contents_refs: Vec<&[u8]> = contents_owned.iter().map(|c| c.as_slice()).collect();
@@ -164,11 +161,7 @@ fn collect_loose_objects(git_dir: &std::path::Path) -> Result<Vec<GitObject>> {
             match read_loose_object(&obj_path) {
                 Ok(obj) => objects.push(obj),
                 Err(e) => {
-                    tracing::warn!(
-                        "Failed to read object {}: {}",
-                        obj_path.display(),
-                        e
-                    );
+                    tracing::warn!("Failed to read object {}: {}", obj_path.display(), e);
                 }
             }
         }

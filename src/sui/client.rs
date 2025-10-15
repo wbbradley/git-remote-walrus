@@ -1,16 +1,19 @@
 use std::{collections::BTreeMap, path::PathBuf};
 
 use anyhow::{Context, Result};
-use base64::display::Base64Display;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::{display::Base64Display, engine::general_purpose::URL_SAFE_NO_PAD};
 use num_bigint::BigUint;
 use shared_crypto::intent::Intent;
 use sui_config::PersistedConfig;
 use sui_keys::keystore::AccountKeystore;
 use sui_sdk::{
     rpc_types::{
-        SuiMoveStruct, SuiMoveValue, SuiObjectDataOptions, SuiParsedData,
-        SuiTransactionBlockEffectsAPI, SuiTransactionBlockResponseOptions,
+        SuiMoveStruct,
+        SuiMoveValue,
+        SuiObjectDataOptions,
+        SuiParsedData,
+        SuiTransactionBlockEffectsAPI,
+        SuiTransactionBlockResponseOptions,
     },
     sui_client_config::SuiClientConfig,
     SuiClientBuilder,
@@ -616,8 +619,7 @@ impl SuiClient {
         let parsed_ids: Result<Vec<ObjectID>> = object_ids
             .iter()
             .map(|id| {
-                ObjectID::from_hex_literal(id)
-                    .with_context(|| format!("Invalid object ID: {}", id))
+                ObjectID::from_hex_literal(id).with_context(|| format!("Invalid object ID: {}", id))
             })
             .collect();
         let parsed_ids = parsed_ids?;

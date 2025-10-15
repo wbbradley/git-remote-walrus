@@ -69,9 +69,7 @@ impl ParsedContentId {
     pub fn blob_object_id(&self) -> &str {
         match self {
             ParsedContentId::Legacy { blob_object_id } => blob_object_id,
-            ParsedContentId::Batched {
-                blob_object_id, ..
-            } => blob_object_id,
+            ParsedContentId::Batched { blob_object_id, .. } => blob_object_id,
         }
     }
 

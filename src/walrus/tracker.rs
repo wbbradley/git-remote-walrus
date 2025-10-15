@@ -210,7 +210,8 @@ mod tests {
 
         // Test with filter - only check specific blobs
         let filter = vec!["0x1".to_string()];
-        let (should_warn, min_epoch, expiring) = tracker.check_expiration_warning(50, 60, Some(&filter));
+        let (should_warn, min_epoch, expiring) =
+            tracker.check_expiration_warning(50, 60, Some(&filter));
         assert!(should_warn);
         assert_eq!(min_epoch, Some(100));
         assert_eq!(expiring.len(), 1);
@@ -218,7 +219,8 @@ mod tests {
 
         // Filter that excludes the expiring blob
         let filter = vec!["0x2".to_string()];
-        let (should_warn, min_epoch, expiring) = tracker.check_expiration_warning(50, 60, Some(&filter));
+        let (should_warn, min_epoch, expiring) =
+            tracker.check_expiration_warning(50, 60, Some(&filter));
         assert!(!should_warn);
         assert_eq!(min_epoch, None);
         assert_eq!(expiring.len(), 0);

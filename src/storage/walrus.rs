@@ -6,12 +6,15 @@ use sha2::{Digest, Sha256};
 
 use super::{
     traits::{ContentId, ImmutableStore, MutableState, StorageBackend},
-    CacheIndex, FilesystemStorage, ParsedContentId, State,
+    CacheIndex,
+    FilesystemStorage,
+    ParsedContentId,
+    State,
 };
 use crate::{
     config::WalrusRemoteConfig,
     sui::SuiClient,
-    walrus::{BlobTracker, WalrusClient},
+    walrus::{BlobTracker, WalrusClient, WalrusNetworkInfo},
 };
 
 /// Storage backend using Walrus for immutable objects and Sui for mutable state
@@ -45,6 +48,12 @@ pub struct WalrusStorage {
 
     /// Blob tracker path
     blob_tracker_path: PathBuf,
+
+    /// Network info path
+    network_info_path: PathBuf,
+
+    /// Cached network info
+    network_info: RefCell<Option<WalrusNetworkInfo>>,
 
     /// Cached state to avoid redundant reads during single operation
     /// (e.g., list followed by fetch both need state)
@@ -82,6 +91,7 @@ impl WalrusStorage {
         // Set up paths
         let cache_index_path = cache_dir.join("cache_index.yaml");
         let blob_tracker_path = cache_dir.join("blob_tracker.yaml");
+        let network_info_path = cache_dir.join("network_info.yaml");
 
         Ok(Self {
             config: walrus_remote_config,
@@ -92,6 +102,8 @@ impl WalrusStorage {
             runtime,
             cache_index_path,
             blob_tracker_path,
+            network_info_path,
+            network_info: RefCell::new(None),
             cached_state: RefCell::new(None),
         })
     }
@@ -125,6 +137,48 @@ impl WalrusStorage {
         tracker
             .save(&self.blob_tracker_path)
             .context("Failed to save blob tracker")
+    }
+
+    /// Get network info (lazy-loaded and cached)
+    fn get_network_info(&self) -> Result<WalrusNetworkInfo> {
+        // Check if we have cached network info
+        if let Some(cached) = self.network_info.borrow().as_ref() {
+            return Ok(cached.clone());
+        }
+
+        // Try to load from file
+        let network_info = if let Some(info) = WalrusNetworkInfo::load(&self.network_info_path)? {
+            tracing::debug!("Loaded network info from cache");
+            info
+        } else {
+            // Query from Walrus CLI
+            tracing::info!("Querying Walrus network info...");
+            let info = WalrusNetworkInfo::query(self.config.walrus_config_path.as_ref())
+                .context("Failed to query Walrus network info")?;
+
+            // Save for future use
+            info.save(&self.network_info_path)
+                .context("Failed to save network info")?;
+
+            tracing::info!(
+                "Network limits: max_blob_size={} bytes ({:.2} MB)",
+                info.max_blob_size(),
+                info.max_blob_size() as f64 / (1024.0 * 1024.0)
+            );
+
+            info
+        };
+
+        // Cache it
+        *self.network_info.borrow_mut() = Some(network_info.clone());
+
+        Ok(network_info)
+    }
+
+    /// Get the actual maximum blob size for this Walrus network
+    fn get_max_blob_size(&self) -> Result<u64> {
+        let network_info = self.get_network_info()?;
+        Ok(network_info.max_blob_size())
     }
 
     /// Extract unique blob_object_ids from ContentIds (handles batched format)
@@ -196,14 +250,15 @@ impl WalrusStorage {
         // Batch query Sui for all blob statuses with progress tracking
         let results = {
             let pb_clone = pb.clone();
-            self.runtime.block_on(
-                self.sui_client
-                    .get_shared_blob_statuses_batch(&blobs_to_query, Some(move |count| {
+            self.runtime
+                .block_on(self.sui_client.get_shared_blob_statuses_batch(
+                    &blobs_to_query,
+                    Some(move |count| {
                         if let Some(ref bar) = pb_clone {
                             bar.inc(count as u64);
                         }
-                    })),
-            )?
+                    }),
+                ))?
         };
 
         // Finish progress bar
@@ -263,23 +318,20 @@ impl WalrusStorage {
         let current_epoch = match self.walrus_client.current_epoch() {
             Ok(info) => info.current_epoch,
             Err(e) => {
-                tracing::warn!(
-                    "Failed to get current Walrus epoch: {}",
-                    e
-                );
+                tracing::warn!("Failed to get current Walrus epoch: {}", e);
                 return Ok(());
             }
         };
 
         // Check for expiration warnings (filtered to relevant blobs if provided)
-        let (should_warn, min_epoch, expiring_soon) = tracker
-            .check_expiration_warning(current_epoch, self.config.expiration_warning_threshold, relevant_blob_ids);
+        let (should_warn, min_epoch, expiring_soon) = tracker.check_expiration_warning(
+            current_epoch,
+            self.config.expiration_warning_threshold,
+            relevant_blob_ids,
+        );
 
         if should_warn {
-            tracing::warn!(
-                "WARNING: {} blob(s) expiring soon!",
-                expiring_soon.len()
-            );
+            tracing::warn!("WARNING: {} blob(s) expiring soon!", expiring_soon.len());
             tracing::warn!("  Current Walrus epoch: {}", current_epoch);
             tracing::warn!(
                 "  Warning threshold: {} epochs",
@@ -308,8 +360,12 @@ impl WalrusStorage {
                 "  Action required: Re-upload expiring blobs or repository may become inaccessible"
             );
         } else {
-            tracing::info!("Tracking {} blob(s), earliest expiration at epoch {} (current: {})",
-                     tracker.count(), min_epoch.unwrap_or(0), current_epoch);
+            tracing::info!(
+                "Tracking {} blob(s), earliest expiration at epoch {} (current: {})",
+                tracker.count(),
+                min_epoch.unwrap_or(0),
+                current_epoch
+            );
         }
 
         Ok(())
@@ -354,10 +410,10 @@ impl ImmutableStore for WalrusStorage {
         self.save_cache_index(&cache_index)?;
 
         // 5. Get blob status from Sui and track expiration
-        match self
-            .runtime
-            .block_on(self.sui_client.get_shared_blob_status(&blob_info.shared_object_id))
-        {
+        match self.runtime.block_on(
+            self.sui_client
+                .get_shared_blob_status(&blob_info.shared_object_id),
+        ) {
             Ok(status) => {
                 let mut tracker = self.load_blob_tracker()?;
                 tracker.track_blob(
@@ -371,7 +427,8 @@ impl ImmutableStore for WalrusStorage {
             Err(e) => {
                 tracing::warn!(
                     "Failed to get blob status from Sui: {} [shared_object_id: {}]",
-                    e, blob_info.shared_object_id
+                    e,
+                    blob_info.shared_object_id
                 );
             }
         }
@@ -393,10 +450,19 @@ impl ImmutableStore for WalrusStorage {
                 .collect();
         }
 
+        // Get the effective max blob size (minimum of config and network limit)
+        let network_max_blob_size = self
+            .get_max_blob_size()
+            .context("Failed to get network blob size limit")?;
+        let max_batch_blob_size =
+            std::cmp::min(self.config.max_batch_blob_size, network_max_blob_size);
+
         tracing::info!(
-            "Processing {} objects (batching enabled, max batch size: {} MB)",
+            "Processing {} objects (batching enabled, effective max blob size: {:.2} MB, config: {:.2} MB, network: {:.2} MB)",
             contents.len(),
-            self.config.max_batch_blob_size / (1024 * 1024)
+            max_batch_blob_size as f64 / (1024.0 * 1024.0),
+            self.config.max_batch_blob_size as f64 / (1024.0 * 1024.0),
+            network_max_blob_size as f64 / (1024.0 * 1024.0)
         );
 
         // Load cache index once for all lookups
@@ -424,7 +490,10 @@ impl ImmutableStore for WalrusStorage {
 
         if objects_to_upload.is_empty() {
             tracing::info!("All {} objects already cached", contents.len());
-            return Ok(result_content_ids.into_iter().map(|id| id.unwrap()).collect());
+            return Ok(result_content_ids
+                .into_iter()
+                .map(|id| id.unwrap())
+                .collect());
         }
 
         tracing::info!(
@@ -433,7 +502,7 @@ impl ImmutableStore for WalrusStorage {
             contents.len() - objects_to_upload.len()
         );
 
-        // Group objects into batches respecting max_batch_blob_size
+        // Group objects into batches respecting network max blob size
         let mut batches: Vec<Vec<(usize, &[u8], String)>> = Vec::new();
         let mut current_batch: Vec<(usize, &[u8], String)> = Vec::new();
         let mut current_batch_size: u64 = 0;
@@ -443,9 +512,7 @@ impl ImmutableStore for WalrusStorage {
 
             // If adding this object would exceed max batch size AND we have objects in the batch,
             // finalize the current batch and start a new one
-            if current_batch_size + content_len > self.config.max_batch_blob_size
-                && !current_batch.is_empty()
-            {
+            if current_batch_size + content_len > max_batch_blob_size && !current_batch.is_empty() {
                 batches.push(std::mem::take(&mut current_batch));
                 current_batch_size = 0;
             }
@@ -459,10 +526,7 @@ impl ImmutableStore for WalrusStorage {
             batches.push(current_batch);
         }
 
-        tracing::info!(
-            "Created {} batch(es) for upload",
-            batches.len()
-        );
+        tracing::info!("Created {} batch(es) for upload", batches.len());
 
         // Upload each batch
         for (batch_num, batch) in batches.iter().enumerate() {
@@ -484,7 +548,8 @@ impl ImmutableStore for WalrusStorage {
                     .store(content)
                     .context("Failed to store object in Walrus")?;
 
-                let content_id = ParsedContentId::legacy(blob_info.shared_object_id.clone()).encode();
+                let content_id =
+                    ParsedContentId::legacy(blob_info.shared_object_id.clone()).encode();
 
                 // Cache locally
                 let _ = self.cache.write_object(content); // Ignore errors
@@ -493,10 +558,10 @@ impl ImmutableStore for WalrusStorage {
                 cache_index.insert(blob_info.shared_object_id.clone(), sha256.clone());
 
                 // Track blob expiration
-                if let Ok(status) = self
-                    .runtime
-                    .block_on(self.sui_client.get_shared_blob_status(&blob_info.shared_object_id))
-                {
+                if let Ok(status) = self.runtime.block_on(
+                    self.sui_client
+                        .get_shared_blob_status(&blob_info.shared_object_id),
+                ) {
                     blob_tracker.track_blob(
                         status.object_id,
                         status.blob_id,
@@ -543,10 +608,10 @@ impl ImmutableStore for WalrusStorage {
                 }
 
                 // Track blob expiration for the batched blob
-                if let Ok(status) = self
-                    .runtime
-                    .block_on(self.sui_client.get_shared_blob_status(&blob_info.shared_object_id))
-                {
+                if let Ok(status) = self.runtime.block_on(
+                    self.sui_client
+                        .get_shared_blob_status(&blob_info.shared_object_id),
+                ) {
                     blob_tracker.track_blob(
                         status.object_id,
                         status.blob_id,
@@ -588,12 +653,18 @@ impl ImmutableStore for WalrusStorage {
             // Try cache hit
             match self.cache.read_object(sha256) {
                 Ok(content) => {
-                    tracing::debug!("Cache hit for ContentId {}", &id[..std::cmp::min(id.len(), 16)]);
+                    tracing::debug!(
+                        "Cache hit for ContentId {}",
+                        &id[..std::cmp::min(id.len(), 16)]
+                    );
                     return Ok(content);
                 }
                 Err(_) => {
                     // Cache miss, continue to Walrus
-                    tracing::debug!("Cache miss for ContentId {}", &id[..std::cmp::min(id.len(), 16)]);
+                    tracing::debug!(
+                        "Cache miss for ContentId {}",
+                        &id[..std::cmp::min(id.len(), 16)]
+                    );
                 }
             }
         }
@@ -609,7 +680,12 @@ impl ImmutableStore for WalrusStorage {
         let blob_status = self
             .runtime
             .block_on(self.sui_client.get_shared_blob_status(blob_object_id))
-            .with_context(|| format!("Failed to get SharedBlob status for object {}", blob_object_id))?;
+            .with_context(|| {
+                format!(
+                    "Failed to get SharedBlob status for object {}",
+                    blob_object_id
+                )
+            })?;
 
         // 4. Read from Walrus using blob_id
         tracing::info!(
@@ -752,15 +828,15 @@ impl MutableState for WalrusStorage {
                 })?;
 
             // Read from Walrus using blob_id
-            let objects_yaml = self
-                .walrus_client
-                .read(&blob_status.blob_id)
-                .with_context(|| {
-                    format!(
-                        "Failed to read objects map from Walrus (blob: {}, object: {})",
-                        blob_status.blob_id, object_id
-                    )
-                })?;
+            let objects_yaml =
+                self.walrus_client
+                    .read(&blob_status.blob_id)
+                    .with_context(|| {
+                        format!(
+                            "Failed to read objects map from Walrus (blob: {}, object: {})",
+                            blob_status.blob_id, object_id
+                        )
+                    })?;
             serde_yaml::from_slice(&objects_yaml).context("Failed to parse objects map YAML")?
         } else {
             tracing::info!("  No objects object ID found, starting with empty objects map");
