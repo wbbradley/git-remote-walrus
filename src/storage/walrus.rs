@@ -5,7 +5,7 @@ use sha2::{Digest, Sha256};
 
 use super::{
     traits::{ContentId, ImmutableStore, MutableState, StorageBackend},
-    CacheIndex, FilesystemStorage, State,
+    CacheIndex, FilesystemStorage, ParsedContentId, State,
 };
 use crate::{
     config::WalrusRemoteConfig,
@@ -126,8 +126,87 @@ impl WalrusStorage {
             .context("Failed to save blob tracker")
     }
 
+    /// Extract unique blob_object_ids from ContentIds (handles batched format)
+    fn extract_blob_object_ids(content_ids: &[&str]) -> Vec<String> {
+        use std::collections::HashSet;
+
+        let mut blob_ids: HashSet<String> = HashSet::new();
+
+        for content_id in content_ids {
+            if let Ok(parsed) = ParsedContentId::parse(content_id) {
+                blob_ids.insert(parsed.blob_object_id().to_string());
+            }
+        }
+
+        blob_ids.into_iter().collect()
+    }
+
+    /// Rehydrate blob_tracker from objects map (lazy discovery)
+    /// This allows any client to discover blob expiration info from on-chain state
+    fn rehydrate_blob_tracker(&self, objects: &BTreeMap<String, ContentId>) -> Result<()> {
+        if objects.is_empty() {
+            return Ok(());
+        }
+
+        // Extract all unique blob_object_ids from the objects map
+        let content_ids: Vec<&str> = objects.values().map(|s| s.as_str()).collect();
+        let blob_object_ids = Self::extract_blob_object_ids(&content_ids);
+
+        if blob_object_ids.is_empty() {
+            return Ok(());
+        }
+
+        tracing::info!(
+            "  Rehydrating blob tracker from {} unique blob(s)...",
+            blob_object_ids.len()
+        );
+
+        // Load current tracker to check what we already have
+        let mut tracker = self.load_blob_tracker()?;
+
+        // Query Sui for blob statuses we don't already have
+        let mut discovered_count = 0;
+        for blob_object_id in blob_object_ids {
+            // Skip if we already track this blob
+            if tracker.get_blob(&blob_object_id).is_some() {
+                continue;
+            }
+
+            // Query Sui for this blob's status
+            match self
+                .runtime
+                .block_on(self.sui_client.get_shared_blob_status(&blob_object_id))
+            {
+                Ok(status) => {
+                    tracker.track_blob(
+                        status.object_id,
+                        status.blob_id,
+                        status.end_epoch,
+                        None, // We don't know size from just object ID
+                    );
+                    discovered_count += 1;
+                }
+                Err(e) => {
+                    tracing::debug!(
+                        "Could not get blob status for {}: {}",
+                        &blob_object_id[..std::cmp::min(blob_object_id.len(), 16)],
+                        e
+                    );
+                }
+            }
+        }
+
+        if discovered_count > 0 {
+            tracing::info!("  Discovered {} new blob(s) for tracking", discovered_count);
+            self.save_blob_tracker(&tracker)?;
+        }
+
+        Ok(())
+    }
+
     /// Check for blob expiration warnings and emit to stderr
-    fn check_blob_expiration(&self) -> Result<()> {
+    /// If `relevant_blob_ids` is provided, only check those specific blobs
+    fn check_blob_expiration(&self, relevant_blob_ids: Option<&Vec<String>>) -> Result<()> {
         tracing::debug!("Checking blob expiration...");
         let tracker = self.load_blob_tracker()?;
 
@@ -147,9 +226,9 @@ impl WalrusStorage {
             }
         };
 
-        // Check for expiration warnings
+        // Check for expiration warnings (filtered to relevant blobs if provided)
         let (should_warn, min_epoch, expiring_soon) = tracker
-            .check_expiration_warning(current_epoch, self.config.expiration_warning_threshold);
+            .check_expiration_warning(current_epoch, self.config.expiration_warning_threshold, relevant_blob_ids);
 
         if should_warn {
             tracing::warn!(
@@ -256,16 +335,207 @@ impl ImmutableStore for WalrusStorage {
     }
 
     fn write_objects(&self, contents: &[&[u8]]) -> Result<Vec<ContentId>> {
-        // Simple implementation: write sequentially
-        // TODO: Could optimize with parallel uploads in the future
-        contents
-            .iter()
-            .map(|content| self.write_object(content))
-            .collect()
+        if contents.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // If batching is disabled, fall back to sequential writes
+        if !self.config.enable_batching {
+            tracing::debug!("Batching disabled, using sequential writes");
+            return contents
+                .iter()
+                .map(|content| self.write_object(content))
+                .collect();
+        }
+
+        tracing::info!(
+            "Processing {} objects (batching enabled, max batch size: {} MB)",
+            contents.len(),
+            self.config.max_batch_blob_size / (1024 * 1024)
+        );
+
+        // Load cache index once for all lookups
+        let mut cache_index = self.load_cache_index()?;
+        let mut blob_tracker = self.load_blob_tracker()?;
+
+        // Track result ContentIds (in same order as input)
+        let mut result_content_ids: Vec<Option<ContentId>> = vec![None; contents.len()];
+
+        // Separate already-cached objects from those that need uploading
+        let mut objects_to_upload: Vec<(usize, &[u8], String)> = Vec::new(); // (index, content, sha256)
+
+        for (i, content) in contents.iter().enumerate() {
+            let sha256 = Self::compute_sha256(content);
+
+            if let Some(existing_content_id) = cache_index.get_object_id(&sha256) {
+                // Already cached
+                tracing::debug!("Object {}... already cached", &sha256[..8]);
+                result_content_ids[i] = Some(existing_content_id.clone());
+            } else {
+                // Needs uploading
+                objects_to_upload.push((i, content, sha256));
+            }
+        }
+
+        if objects_to_upload.is_empty() {
+            tracing::info!("All {} objects already cached", contents.len());
+            return Ok(result_content_ids.into_iter().map(|id| id.unwrap()).collect());
+        }
+
+        tracing::info!(
+            "Need to upload {} new objects ({} already cached)",
+            objects_to_upload.len(),
+            contents.len() - objects_to_upload.len()
+        );
+
+        // Group objects into batches respecting max_batch_blob_size
+        let mut batches: Vec<Vec<(usize, &[u8], String)>> = Vec::new();
+        let mut current_batch: Vec<(usize, &[u8], String)> = Vec::new();
+        let mut current_batch_size: u64 = 0;
+
+        for (idx, content, sha256) in objects_to_upload {
+            let content_len = content.len() as u64;
+
+            // If adding this object would exceed max batch size AND we have objects in the batch,
+            // finalize the current batch and start a new one
+            if current_batch_size + content_len > self.config.max_batch_blob_size
+                && !current_batch.is_empty()
+            {
+                batches.push(std::mem::take(&mut current_batch));
+                current_batch_size = 0;
+            }
+
+            current_batch.push((idx, content, sha256));
+            current_batch_size += content_len;
+        }
+
+        // Add the last batch if non-empty
+        if !current_batch.is_empty() {
+            batches.push(current_batch);
+        }
+
+        tracing::info!(
+            "Created {} batch(es) for upload",
+            batches.len()
+        );
+
+        // Upload each batch
+        for (batch_num, batch) in batches.iter().enumerate() {
+            let batch_size: usize = batch.iter().map(|(_, content, _)| content.len()).sum();
+            tracing::info!(
+                "Uploading batch {}/{} ({} objects, {} bytes)",
+                batch_num + 1,
+                batches.len(),
+                batch.len(),
+                batch_size
+            );
+
+            if batch.len() == 1 {
+                // Single object in batch - use legacy format (no batching overhead)
+                let (idx, content, sha256) = &batch[0];
+
+                let blob_info = self
+                    .walrus_client
+                    .store(content)
+                    .context("Failed to store object in Walrus")?;
+
+                let content_id = ParsedContentId::legacy(blob_info.shared_object_id.clone()).encode();
+
+                // Cache locally
+                let _ = self.cache.write_object(content); // Ignore errors
+
+                // Update cache index
+                cache_index.insert(blob_info.shared_object_id.clone(), sha256.clone());
+
+                // Track blob expiration
+                if let Ok(status) = self
+                    .runtime
+                    .block_on(self.sui_client.get_shared_blob_status(&blob_info.shared_object_id))
+                {
+                    blob_tracker.track_blob(
+                        status.object_id,
+                        status.blob_id,
+                        status.end_epoch,
+                        Some(content.len() as u64),
+                    );
+                }
+
+                result_content_ids[*idx] = Some(content_id);
+            } else {
+                // Multiple objects in batch - concatenate and use batched format
+                let mut concatenated = Vec::with_capacity(batch_size);
+                let mut offsets: Vec<(usize, u64, u64, String)> = Vec::new(); // (index, offset, length, sha256)
+
+                for (idx, content, sha256) in batch {
+                    let offset = concatenated.len() as u64;
+                    let length = content.len() as u64;
+                    concatenated.extend_from_slice(content);
+                    offsets.push((*idx, offset, length, sha256.clone()));
+
+                    // Cache individual object locally
+                    let _ = self.cache.write_object(content); // Ignore errors
+                }
+
+                // Upload concatenated batch to Walrus
+                let blob_info = self
+                    .walrus_client
+                    .store(&concatenated)
+                    .context("Failed to store batched blob in Walrus")?;
+
+                // Create batched ContentIds for each object
+                for (idx, offset, length, sha256) in offsets {
+                    let content_id = ParsedContentId::batched(
+                        blob_info.shared_object_id.clone(),
+                        offset,
+                        length,
+                    )
+                    .encode();
+
+                    // Update cache index with batched ContentId
+                    cache_index.insert(content_id.clone(), sha256);
+
+                    result_content_ids[idx] = Some(content_id);
+                }
+
+                // Track blob expiration for the batched blob
+                if let Ok(status) = self
+                    .runtime
+                    .block_on(self.sui_client.get_shared_blob_status(&blob_info.shared_object_id))
+                {
+                    blob_tracker.track_blob(
+                        status.object_id,
+                        status.blob_id,
+                        status.end_epoch,
+                        Some(concatenated.len() as u64),
+                    );
+                }
+
+                tracing::info!(
+                    "Batch {}/{} uploaded to {} ({} objects batched)",
+                    batch_num + 1,
+                    batches.len(),
+                    &blob_info.shared_object_id[..16],
+                    batch.len()
+                );
+            }
+        }
+
+        // Save updated cache index and blob tracker
+        self.save_cache_index(&cache_index)?;
+        self.save_blob_tracker(&blob_tracker)?;
+
+        // Ensure all results are populated
+        Ok(result_content_ids
+            .into_iter()
+            .map(|id| id.expect("All ContentIds should be populated"))
+            .collect())
     }
 
     fn read_object(&self, id: &str) -> Result<Vec<u8>> {
-        // id is now an object_id
+        // Parse ContentId to detect batched vs legacy format
+        let parsed_id = ParsedContentId::parse(id)
+            .with_context(|| format!("Invalid ContentId format: {}", id))?;
+
         // 1. Try to read from cache (by sha256)
         let cache_index = self.load_cache_index()?;
 
@@ -273,46 +543,80 @@ impl ImmutableStore for WalrusStorage {
             // Try cache hit
             match self.cache.read_object(sha256) {
                 Ok(content) => {
-                    tracing::debug!("Cache hit for {}", &id[..16]);
+                    tracing::debug!("Cache hit for ContentId {}", &id[..std::cmp::min(id.len(), 16)]);
                     return Ok(content);
                 }
                 Err(_) => {
                     // Cache miss, continue to Walrus
-                    tracing::debug!("Cache miss for {}", &id[..16]);
+                    tracing::debug!("Cache miss for ContentId {}", &id[..std::cmp::min(id.len(), 16)]);
                 }
             }
         }
 
-        // 2. Get blob_id from Sui object
+        // 2. Get the blob_object_id (same for both legacy and batched)
+        let blob_object_id = parsed_id.blob_object_id();
+
+        // 3. Get blob_id from Sui object
         tracing::debug!(
             "Querying Sui for blob_id (object: {})",
-            &id[..16]
+            &blob_object_id[..std::cmp::min(blob_object_id.len(), 16)]
         );
         let blob_status = self
             .runtime
-            .block_on(self.sui_client.get_shared_blob_status(id))
-            .with_context(|| format!("Failed to get SharedBlob status for object {}", id))?;
+            .block_on(self.sui_client.get_shared_blob_status(blob_object_id))
+            .with_context(|| format!("Failed to get SharedBlob status for object {}", blob_object_id))?;
 
-        // 3. Read from Walrus using blob_id
+        // 4. Read from Walrus using blob_id
         tracing::info!(
             "Downloading from Walrus: {}",
-            &blob_status.blob_id[..16]
+            &blob_status.blob_id[..std::cmp::min(blob_status.blob_id.len(), 16)]
         );
-        let content = self
+        let full_blob = self
             .walrus_client
             .read(&blob_status.blob_id)
             .with_context(|| {
                 format!(
                     "Failed to read blob {} from Walrus (object: {})",
-                    blob_status.blob_id, id
+                    blob_status.blob_id, blob_object_id
                 )
             })?;
 
-        // 4. Cache it locally
+        // 5. Extract the appropriate content based on ContentId format
+        let content = match parsed_id {
+            ParsedContentId::Legacy { .. } => {
+                // Legacy format: entire blob is the object
+                full_blob
+            }
+            ParsedContentId::Batched { offset, length, .. } => {
+                // Batched format: extract slice from concatenated blob
+                let start = offset as usize;
+                let end = (offset + length) as usize;
+
+                if end > full_blob.len() {
+                    anyhow::bail!(
+                        "Batched ContentId specifies range {}..{} but blob is only {} bytes",
+                        start,
+                        end,
+                        full_blob.len()
+                    );
+                }
+
+                tracing::debug!(
+                    "Extracting batched object: bytes {}..{} from blob of {} bytes",
+                    start,
+                    end,
+                    full_blob.len()
+                );
+
+                full_blob[start..end].to_vec()
+            }
+        };
+
+        // 6. Cache it locally
         let sha256 = Self::compute_sha256(&content);
         let _ = self.cache.write_object(&content); // Ignore errors on cache write
 
-        // 5. Update cache index
+        // 7. Update cache index
         let mut cache_index = self.load_cache_index()?;
         cache_index.insert(id.to_string(), sha256);
         let _ = self.save_cache_index(&cache_index); // Ignore errors on index write
@@ -420,6 +724,12 @@ impl MutableState for WalrusStorage {
 
         tracing::info!("  Retrieved {} objects mappings", objects.len());
 
+        // Lazy rehydration: discover blob expiration info from objects map
+        // This allows any client (including fresh clones) to track blob expiration
+        if !objects.is_empty() {
+            let _ = self.rehydrate_blob_tracker(&objects); // Best effort, don't fail on errors
+        }
+
         let state = State { refs, objects };
 
         // Cache the state for subsequent reads
@@ -439,8 +749,10 @@ impl MutableState for WalrusStorage {
         // Invalidate cached state since we're writing new state
         *self.cached_state.borrow_mut() = None;
 
-        // Check for blob expiration warnings
-        let _ = self.check_blob_expiration();
+        // Check for blob expiration warnings (scoped to this repo's blobs)
+        let content_ids: Vec<&str> = state.objects.values().map(|s| s.as_str()).collect();
+        let relevant_blob_ids = Self::extract_blob_object_ids(&content_ids);
+        let _ = self.check_blob_expiration(Some(&relevant_blob_ids));
 
         // Step 1: Acquire lock on RemoteState (5 minute timeout)
         // This ensures no one else can modify the state while we upload to Walrus
@@ -517,9 +829,6 @@ impl StorageBackend for WalrusStorage {
         self.cache
             .initialize()
             .context("Failed to initialize cache")?;
-
-        // Check blob expiration warnings
-        let _ = self.check_blob_expiration();
 
         Ok(())
     }

@@ -38,6 +38,12 @@ pub struct WalrusRemoteConfig {
     /// Warning threshold for blob expiration (epochs)
     #[serde(default = "defaults::default_warning_threshold")]
     pub expiration_warning_threshold: u64,
+    /// Enable batching multiple objects into single blobs
+    #[serde(default = "defaults::default_enable_batching")]
+    pub enable_batching: bool,
+    /// Maximum size for batched blobs (in bytes)
+    #[serde(default = "defaults::default_max_batch_blob_size")]
+    pub max_batch_blob_size: u64,
 }
 
 impl WalrusRemoteConfig {
@@ -136,6 +142,14 @@ mod defaults {
     pub(crate) fn default_warning_threshold() -> u64 {
         10
     }
+
+    pub(crate) fn default_enable_batching() -> bool {
+        true
+    }
+
+    pub(crate) fn default_max_batch_blob_size() -> u64 {
+        100 * 1024 * 1024 // 100 MB
+    }
 }
 
 #[cfg(test)]
@@ -155,6 +169,8 @@ mod tests {
             cache_dir: dir.path().join("cache"),
             default_epochs: 7,
             expiration_warning_threshold: 15,
+            enable_batching: true,
+            max_batch_blob_size: 100 * 1024 * 1024,
         };
         config.save(&config_path).unwrap();
 

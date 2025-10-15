@@ -84,17 +84,30 @@ pub fn receive_pack<R: Read>(
     let objects = collect_loose_objects(&git_dir)?;
     tracing::info!("Unpacked {} objects", objects.len());
 
-    // Store each object in immutable storage
-    let mut mappings = Vec::new();
-    for obj in objects {
-        let content = obj.to_loose_format();
-        let content_id = storage
-            .write_object(&content)
-            .with_context(|| format!("Failed to store object {}", obj.id))?;
+    // Store objects in immutable storage using batched write
+    // Collect all object contents first
+    let contents_owned: Vec<Vec<u8>> = objects
+        .iter()
+        .map(|obj| obj.to_loose_format())
+        .collect();
 
-        tracing::debug!("Stored object {} -> {}", obj.id, content_id);
-        mappings.push((obj.id, content_id));
-    }
+    // Create slice references for write_objects
+    let contents_refs: Vec<&[u8]> = contents_owned.iter().map(|c| c.as_slice()).collect();
+
+    // Batch write all objects
+    let content_ids = storage
+        .write_objects(&contents_refs)
+        .context("Failed to store objects in batch")?;
+
+    // Create mappings from object IDs to content IDs
+    let mappings: Vec<(ObjectId, ContentId)> = objects
+        .iter()
+        .zip(content_ids.iter())
+        .map(|(obj, content_id)| {
+            tracing::debug!("Stored object {} -> {}", obj.id, content_id);
+            (obj.id.clone(), content_id.clone())
+        })
+        .collect();
 
     Ok(mappings)
 }

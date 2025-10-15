@@ -96,6 +96,7 @@ impl BlobTracker {
     }
 
     /// Get minimum expiration epoch across all blobs
+    #[allow(dead_code)]
     pub fn min_end_epoch(&self) -> Option<u64> {
         self.blobs.values().map(|info| info.end_epoch).min()
     }
@@ -127,20 +128,27 @@ impl BlobTracker {
 
     /// Check if we should warn about expiring blobs
     /// Returns (should_warn, min_epoch, blobs_expiring_soon)
+    /// If `filter_blob_ids` is provided, only check those specific blob object IDs
     pub fn check_expiration_warning(
         &self,
         current_epoch: u64,
         warning_threshold: u64,
+        filter_blob_ids: Option<&Vec<String>>,
     ) -> (bool, Option<u64>, Vec<&BlobInfo>) {
-        let min_epoch = self.min_end_epoch();
+        // Get expiring blobs
+        let warn_epoch = current_epoch + warning_threshold;
+        let mut expiring_soon: Vec<_> = self.expiring_before(warn_epoch).into_iter().collect();
 
-        if let Some(min) = min_epoch {
-            let warn_epoch = current_epoch + warning_threshold;
-            let expiring_soon: Vec<_> = self.expiring_before(warn_epoch).into_iter().collect();
+        // Filter to only relevant blobs if filter is provided
+        if let Some(filter) = filter_blob_ids {
+            expiring_soon.retain(|blob| filter.contains(&blob.object_id));
+        }
 
-            if !expiring_soon.is_empty() {
-                return (true, Some(min), expiring_soon);
-            }
+        // Compute min_epoch from filtered set
+        let min_epoch = expiring_soon.iter().map(|b| b.end_epoch).min();
+
+        if !expiring_soon.is_empty() {
+            return (true, min_epoch, expiring_soon);
         }
 
         (false, min_epoch, Vec::new())
@@ -189,15 +197,30 @@ mod tests {
         tracker.track_blob("0x2".to_string(), "blob2".to_string(), 200, None);
 
         // Current epoch 50, warning threshold 60 (warn if expiring within 60 epochs)
-        let (should_warn, min_epoch, expiring) = tracker.check_expiration_warning(50, 60);
+        let (should_warn, min_epoch, expiring) = tracker.check_expiration_warning(50, 60, None);
         assert!(should_warn);
         assert_eq!(min_epoch, Some(100));
         assert_eq!(expiring.len(), 1);
 
         // Current epoch 50, warning threshold 40 (no blobs expiring within 40 epochs)
-        let (should_warn, min_epoch, expiring) = tracker.check_expiration_warning(50, 40);
+        let (should_warn, min_epoch, expiring) = tracker.check_expiration_warning(50, 40, None);
         assert!(!should_warn);
+        assert_eq!(min_epoch, None);
+        assert_eq!(expiring.len(), 0);
+
+        // Test with filter - only check specific blobs
+        let filter = vec!["0x1".to_string()];
+        let (should_warn, min_epoch, expiring) = tracker.check_expiration_warning(50, 60, Some(&filter));
+        assert!(should_warn);
         assert_eq!(min_epoch, Some(100));
+        assert_eq!(expiring.len(), 1);
+        assert_eq!(expiring[0].object_id, "0x1");
+
+        // Filter that excludes the expiring blob
+        let filter = vec!["0x2".to_string()];
+        let (should_warn, min_epoch, expiring) = tracker.check_expiration_warning(50, 60, Some(&filter));
+        assert!(!should_warn);
+        assert_eq!(min_epoch, None);
         assert_eq!(expiring.len(), 0);
     }
 
