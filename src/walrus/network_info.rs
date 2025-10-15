@@ -117,11 +117,6 @@ impl WalrusNetworkInfo {
     }
 }
 
-/// Helper to determine network info path from cache directory
-pub fn network_info_path(cache_dir: &Path) -> PathBuf {
-    cache_dir.join("network_info.yaml")
-}
-
 #[cfg(test)]
 mod tests {
     use tempfile::tempdir;

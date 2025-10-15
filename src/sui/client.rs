@@ -8,12 +8,8 @@ use sui_config::PersistedConfig;
 use sui_keys::keystore::AccountKeystore;
 use sui_sdk::{
     rpc_types::{
-        SuiMoveStruct,
-        SuiMoveValue,
-        SuiObjectDataOptions,
-        SuiParsedData,
-        SuiTransactionBlockEffectsAPI,
-        SuiTransactionBlockResponseOptions,
+        SuiMoveStruct, SuiMoveValue, SuiObjectDataOptions, SuiParsedData,
+        SuiTransactionBlockEffectsAPI, SuiTransactionBlockResponseOptions,
     },
     sui_client_config::SuiClientConfig,
     SuiClientBuilder,
@@ -593,7 +589,7 @@ impl SuiClient {
                 tracing::debug!(
                     "  Processing batch {}/{} ({} objects)",
                     chunk_idx + 1,
-                    (object_ids.len() + BATCH_SIZE - 1) / BATCH_SIZE,
+                    object_ids.len().div_ceil(BATCH_SIZE),
                     chunk.len()
                 );
             }
