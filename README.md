@@ -1,10 +1,12 @@
 # git-remote-walrus
 
-A custom Git remote helper that stores repository data in a content-addressed, immutable storage system.
+A custom Git remote helper that stores repository data in [Walrus](https://www.walrus.xyz/).
 
 ## Overview
 
-`git-remote-walrus` is a Git remote helper that implements the `walrus::` protocol, allowing you to push and pull Git repositories to/from decentralized storage using Sui blockchain and the Walrus network. It also supports a local filesystem backend for testing.
+`git-remote-walrus` is a Git remote helper that implements the `walrus::` protocol, allowing you to
+push and pull Git repositories to/from decentralized storage using the Sui blockchain and the Walrus
+network. It also supports a local filesystem backend for testing.
 
 ## Features
 
@@ -46,6 +48,7 @@ git-remote-walrus config --edit
 ```
 
 Required configuration settings:
+
 - `sui_wallet_path`: Path to your Sui wallet config (e.g., `~/.sui/sui_config/client.yaml`)
 - `walrus_config_path`: Path to your Walrus config (e.g., `~/.config/walrus/client.yaml`)
 - `cache_dir`: Directory for caching Walrus blobs (e.g., `~/.cache/git-remote-walrus`)
@@ -53,6 +56,7 @@ Required configuration settings:
 - `expiration_warning_threshold`: Warn when blobs expire within N epochs (default: 10)
 
 You can also use environment variables:
+
 - `SUI_WALLET`
 - `WALRUS_CONFIG`
 - `WALRUS_REMOTE_CACHE_DIR`
@@ -73,7 +77,9 @@ git-remote-walrus deploy
 # Package ID: 0x1234abcd...
 ```
 
-**Note**: The Package ID can be shared across all users on the same network. For production use, consider deploying once and documenting a canonical Package ID that all users can reference, rather than having each user deploy their own package.
+**Note**: The Package ID can be shared across all users on the same network. For production use,
+consider deploying once and documenting a canonical Package ID that all users can reference, rather
+than having each user deploy their own package.
 
 **Per-repository setup**: Create a new RemoteState object for each Git repository:
 
@@ -91,7 +97,8 @@ git-remote-walrus init 0x1234abcd... --shared --allow 0xaddress1 --allow 0xaddre
 #   git push storage main
 ```
 
-Note: You only need to deploy once, but you run `init` for each new Git repository you want to store in Walrus.
+Note: You only need to deploy once, but you run `init` for each new Git repository you want to store
+in Walrus.
 
 ### Push to a Walrus remote
 
@@ -145,12 +152,14 @@ git clone walrus::/tmp/mystorage myclone
 ### Walrus Backend (Sui + Walrus)
 
 When using Walrus storage, git-remote-walrus:
+
 - Stores repository state in a Sui RemoteState object (refs and object mappings)
 - Stores Git object data as blobs in the Walrus network
 - Caches Walrus blobs locally in `cache_dir` for performance
 - Manages blob lifecycles with configurable epoch durations
 
 The RemoteState object on Sui tracks:
+
 - Git refs (branches, tags) mapped to commit SHA-1s
 - Git object SHA-1s mapped to Walrus blob IDs
 - Blob metadata including expiration epochs
@@ -168,6 +177,7 @@ The filesystem backend creates the following structure:
 ```
 
 state.yaml format:
+
 ```yaml
 refs:
   refs/heads/main: "abc123..."  # Git SHA-1 of commit
