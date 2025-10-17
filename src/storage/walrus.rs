@@ -746,9 +746,153 @@ impl ImmutableStore for WalrusStorage {
     }
 
     fn read_objects(&self, ids: &[&str]) -> Result<Vec<Vec<u8>>> {
-        // Simple implementation: read sequentially
-        // TODO: Could optimize with parallel reads in the future
-        ids.iter().map(|id| self.read_object(id)).collect()
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Parse all ContentIds and group by blob_object_id to deduplicate blob fetches
+        use std::collections::HashMap;
+
+        // Store results in original order
+        let mut results: Vec<Option<Vec<u8>>> = vec![None; ids.len()];
+
+        // Parse all ContentIds first
+        let parsed_ids: Result<Vec<ParsedContentId>> = ids
+            .iter()
+            .map(|id| {
+                ParsedContentId::parse(id)
+                    .with_context(|| format!("Invalid ContentId format: {}", id))
+            })
+            .collect();
+        let parsed_ids = parsed_ids?;
+
+        // Load cache index once for all lookups
+        let cache_index = self.load_cache_index()?;
+
+        // Group ContentIds by blob_object_id and track which indices need each blob
+        let mut blob_groups: HashMap<String, Vec<(usize, ParsedContentId)>> = HashMap::new();
+        let mut cache_hits = 0;
+
+        for (idx, parsed_id) in parsed_ids.into_iter().enumerate() {
+            // Check if this object is already in cache
+            if let Some(sha256) = cache_index.get_sha256(ids[idx]) {
+                if let Ok(content) = self.cache.read_object(sha256) {
+                    tracing::debug!(
+                        "Cache hit for ContentId {}",
+                        &ids[idx][..std::cmp::min(ids[idx].len(), 16)]
+                    );
+                    results[idx] = Some(content);
+                    cache_hits += 1;
+                    continue;
+                }
+            }
+
+            // Cache miss - need to fetch from Walrus
+            let blob_object_id = parsed_id.blob_object_id().to_string();
+            blob_groups
+                .entry(blob_object_id)
+                .or_default()
+                .push((idx, parsed_id));
+        }
+
+        if cache_hits > 0 {
+            tracing::debug!("{} cache hits out of {} objects", cache_hits, ids.len());
+        }
+
+        if blob_groups.is_empty() {
+            // All cache hits
+            return Ok(results.into_iter().map(|r| r.unwrap()).collect());
+        }
+
+        tracing::info!(
+            "Batch reading {} objects from {} unique blob(s)",
+            ids.len() - cache_hits,
+            blob_groups.len()
+        );
+
+        // Process each unique blob
+        for (blob_object_id, items) in blob_groups {
+            // Get blob_id from Sui
+            tracing::debug!(
+                "Querying Sui for blob_id (object: {})",
+                &blob_object_id[..std::cmp::min(blob_object_id.len(), 16)]
+            );
+            let blob_status = self
+                .runtime
+                .block_on(self.sui_client.get_shared_blob_status(&blob_object_id))
+                .with_context(|| {
+                    format!(
+                        "Failed to get SharedBlob status for object {}",
+                        blob_object_id
+                    )
+                })?;
+
+            // Download blob once for all objects that need it
+            tracing::info!(
+                "Downloading blob {} (needed by {} object(s))",
+                &blob_status.blob_id[..std::cmp::min(blob_status.blob_id.len(), 16)],
+                items.len()
+            );
+            let full_blob = self
+                .walrus_client
+                .read(&blob_status.blob_id)
+                .with_context(|| {
+                    format!(
+                        "Failed to read blob {} from Walrus (object: {})",
+                        blob_status.blob_id, blob_object_id
+                    )
+                })?;
+
+            // Extract content for each object that needs this blob
+            for (idx, parsed_id) in items {
+                let content = match parsed_id {
+                    ParsedContentId::Legacy { .. } => {
+                        // Legacy format: entire blob is the object
+                        full_blob.clone()
+                    }
+                    ParsedContentId::Batched { offset, length, .. } => {
+                        // Batched format: extract slice from concatenated blob
+                        let start = offset as usize;
+                        let end = (offset + length) as usize;
+
+                        if end > full_blob.len() {
+                            anyhow::bail!(
+                                "Batched ContentId specifies range {}..{} but blob is only {} bytes",
+                                start,
+                                end,
+                                full_blob.len()
+                            );
+                        }
+
+                        tracing::debug!(
+                            "Extracting batched object: bytes {}..{} from blob of {} bytes",
+                            start,
+                            end,
+                            full_blob.len()
+                        );
+
+                        full_blob[start..end].to_vec()
+                    }
+                };
+
+                // Cache the extracted content locally
+                let sha256 = Self::compute_sha256(&content);
+                let _ = self.cache.write_object(&content); // Ignore errors on cache write
+
+                // Update cache index
+                let mut cache_index = self.load_cache_index()?;
+                cache_index.insert(ids[idx].to_string(), sha256);
+                let _ = self.save_cache_index(&cache_index); // Ignore errors on index write
+
+                results[idx] = Some(content);
+            }
+        }
+
+        // Ensure all results are populated
+        Ok(results
+            .into_iter()
+            .map(|r| r.expect("All results should be populated"))
+            .collect())
     }
 
     fn delete_object(&self, id: &str) -> Result<()> {

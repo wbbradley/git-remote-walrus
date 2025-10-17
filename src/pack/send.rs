@@ -45,20 +45,33 @@ pub fn send_pack<W: Write>(
 
     // Retrieve objects from storage and write as loose objects
     let objects_dir = git_dir.join("objects");
-    for obj_id in &wanted_objects {
-        // Get storage content ID from state
-        let content_id = state
-            .objects
-            .get(obj_id)
-            .with_context(|| format!("Object {} not found in state", obj_id))?;
 
-        // Read from storage
-        let content = storage
-            .read_object(content_id)
-            .with_context(|| format!("Failed to read object {} from storage", obj_id))?;
+    // Collect all content IDs first for batch reading
+    let content_ids: Result<Vec<_>> = wanted_objects
+        .iter()
+        .map(|obj_id| {
+            state
+                .objects
+                .get(obj_id)
+                .map(|id| id.as_str())
+                .with_context(|| format!("Object {} not found in state", obj_id))
+        })
+        .collect();
+    let content_ids = content_ids?;
 
+    // Batch read all objects (deduplicates blob fetches)
+    tracing::info!(
+        "Batch reading {} objects from storage",
+        wanted_objects.len()
+    );
+    let contents = storage
+        .read_objects(&content_ids)
+        .context("Failed to batch read objects from storage")?;
+
+    // Write each object as a loose object
+    for (obj_id, content) in wanted_objects.iter().zip(contents.iter()) {
         // Parse and write as loose object
-        let obj = GitObject::from_loose_format(&content)
+        let obj = GitObject::from_loose_format(content)
             .with_context(|| format!("Failed to parse object {}", obj_id))?;
 
         write_loose_object(&obj, &objects_dir)
